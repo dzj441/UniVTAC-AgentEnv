@@ -7,6 +7,9 @@
 
 ## Installation
 
+For the experimental three-level, agent-facing `grasp_classify` interface, see
+[Grasp-Classify AgentEnv v0](docs/AgentEnvV0.md).
+
 Clone the repository and run the installation script `scripts/install.sh` to set up the environment and install dependencies all at once. The script will create a conda environment named `UniVTAC` and install Isaac Sim, Isaac Lab, TacEx, cuRobo, and other necessary packages.
 
 ```bash
