@@ -53,3 +53,9 @@ textures.zip
 **/act-ckpt/*
 /*.png
 **/tmp.png
+
+/agent_runs/
+/ghp
+/sicheng/
+/temp
+/third_party/IsaacLab/
