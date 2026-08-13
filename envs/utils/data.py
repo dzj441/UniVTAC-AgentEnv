@@ -239,6 +239,24 @@ class HDF5Handler:
 class VideoHandler:
     def __init__(self):
         self.ffmpeg = None
+
+    @staticmethod
+    def _video_encoder():
+        """Select an H.264 encoder available in the active ffmpeg build."""
+        encoders = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        if "libx264" in encoders:
+            return ["-vcodec", "libx264", "-profile:v", "main", "-crf", "23"]
+        if "libopenh264" in encoders:
+            return ["-vcodec", "libopenh264", "-profile:v", "main", "-b:v", "2M"]
+        raise RuntimeError(
+            "No H.264 encoder is available in ffmpeg. Refusing to emit an "
+            "MPEG-4 Part 2 file that VS Code/browser players commonly reject."
+        )
         
     def reset(self, video_path, video_size):
         if self.ffmpeg is not None:
@@ -253,7 +271,7 @@ class VideoHandler:
             "-f", "rawvideo", "-pixel_format", "rgb24",
             "-video_size", f"{w}x{h}", "-framerate", "10",
             "-i", "-", "-pix_fmt", "yuv420p",
-            "-vcodec", "libx264", "-crf", "23",
+            *self._video_encoder(),
             "-movflags", "+faststart",
             str(self.video_path)
         ], stdin=subprocess.PIPE)
