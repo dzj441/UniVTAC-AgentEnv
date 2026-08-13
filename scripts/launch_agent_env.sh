@@ -31,10 +31,15 @@ DEFAULT_NVIDIA_RENDER_ROOT="/inspire/qb-ilm/project/semantic-visual-tokenizer/pu
 NVIDIA_RENDER_ROOT="${UNIVTAC_NVIDIA_RENDER_ROOT:-${DEFAULT_NVIDIA_RENDER_ROOT}}"
 NVIDIA_RENDER_ROOT="${NVIDIA_RENDER_ROOT%/}"
 NVIDIA_RENDER_VERSION="${UNIVTAC_NVIDIA_RENDER_VERSION:-$(basename -- "${NVIDIA_RENDER_ROOT}")}"
+NVIDIA_USERSPACE_LIB_DIR="${UNIVTAC_NVIDIA_USERSPACE_LIB_DIR:-${NVIDIA_RENDER_ROOT}/runtime-libs-full}"
+NVIDIA_USERSPACE_LIB_DIR="${NVIDIA_USERSPACE_LIB_DIR%/}"
 
 for required_path in \
-  "${NVIDIA_RENDER_ROOT}/runtime-libs/libEGL_nvidia.so.0" \
-  "${NVIDIA_RENDER_ROOT}/runtime-libs/libGLX_nvidia.so.0" \
+  "${NVIDIA_USERSPACE_LIB_DIR}/libcuda.so" \
+  "${NVIDIA_USERSPACE_LIB_DIR}/libcuda.so.1" \
+  "${NVIDIA_USERSPACE_LIB_DIR}/libEGL_nvidia.so.0" \
+  "${NVIDIA_USERSPACE_LIB_DIR}/libGLX_nvidia.so.0" \
+  "${NVIDIA_USERSPACE_LIB_DIR}/libnvidia-ml.so.1" \
   "${NVIDIA_RENDER_ROOT}/nvidia_icd.local.json" \
   "${NVIDIA_RENDER_ROOT}/10_nvidia.local.json"; do
   if [[ ! -e "${required_path}" ]]; then
@@ -43,16 +48,19 @@ for required_path in \
   fi
 done
 
-if ! command -v nvidia-smi >/dev/null 2>&1; then
-  echo "nvidia-smi is required to validate the kernel/userspace driver match." >&2
+HOST_DRIVER_VERSION=""
+if [[ -r /proc/driver/nvidia/version ]]; then
+  HOST_DRIVER_VERSION="$(
+    awk '/^NVRM version:/ { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+([.][0-9]+)+$/) { print $i; exit } }' \
+      /proc/driver/nvidia/version
+  )"
+fi
+if [[ -z "${HOST_DRIVER_VERSION}" ]]; then
+  echo "Cannot determine the host NVIDIA kernel-module version from /proc." >&2
   exit 1
 fi
-mapfile -t HOST_DRIVER_VERSIONS < <(
-  nvidia-smi --query-gpu=driver_version --format=csv,noheader | sort -u
-)
-if [[ "${#HOST_DRIVER_VERSIONS[@]}" -ne 1 ]] || \
-   [[ "${HOST_DRIVER_VERSIONS[0]:-}" != "${NVIDIA_RENDER_VERSION}" ]]; then
-  echo "NVIDIA driver mismatch: bundle=${NVIDIA_RENDER_VERSION}, host=${HOST_DRIVER_VERSIONS[*]:-unknown}" >&2
+if [[ "${HOST_DRIVER_VERSION}" != "${NVIDIA_RENDER_VERSION}" ]]; then
+  echo "NVIDIA driver mismatch: bundle=${NVIDIA_RENDER_VERSION}, kernel=${HOST_DRIVER_VERSION}" >&2
   echo "Set UNIVTAC_NVIDIA_RENDER_ROOT only to a bundle matching the host kernel driver." >&2
   exit 1
 fi
@@ -75,14 +83,17 @@ for library_path in "${INHERITED_LIBRARY_PATHS[@]}"; do
     SANITIZED_LIBRARY_PATH="${SANITIZED_LIBRARY_PATH}:${library_path}"
   fi
 done
-export LD_LIBRARY_PATH="${NVIDIA_RENDER_ROOT}/runtime-libs${SANITIZED_LIBRARY_PATH:+:${SANITIZED_LIBRARY_PATH}}"
-# libcuda is the kernel-facing system layer. Do not preload a second copy next
-# to it; the version guard above ensures it matches this rendering stack.
+export LD_LIBRARY_PATH="${NVIDIA_USERSPACE_LIB_DIR}${SANITIZED_LIBRARY_PATH:+:${SANITIZED_LIBRARY_PATH}}"
+# Resolve libcuda normally through the bundle's libcuda.so.1 SONAME link. A
+# preload would risk mapping a second driver image under another requested name.
 unset LD_PRELOAD
 export VK_ICD_FILENAMES="${NVIDIA_RENDER_ROOT}/nvidia_icd.local.json"
 export __EGL_VENDOR_LIBRARY_FILENAMES="${NVIDIA_RENDER_ROOT}/10_nvidia.local.json"
 export __GLX_VENDOR_LIBRARY_NAME="nvidia"
 export EGL_PLATFORM="surfaceless"
+export UNIVTAC_NVIDIA_RENDER_ROOT="${NVIDIA_RENDER_ROOT}"
+export UNIVTAC_NVIDIA_RENDER_VERSION="${NVIDIA_RENDER_VERSION}"
+export UNIVTAC_NVIDIA_USERSPACE_LIB_DIR="${NVIDIA_USERSPACE_LIB_DIR}"
 
 RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/univtac-agentenv-${UID}}"
 mkdir -p "${RUNTIME_DIR}"
@@ -94,6 +105,10 @@ if [[ -n "${PYTHONPATH:-}" ]]; then
 else
   export PYTHONPATH="${REPO_ROOT}"
 fi
+
+# Fail before the expensive Kit startup if CUDA or any core NVIDIA userspace
+# library resolves outside the selected data-disk bundle.
+"${PYTHON_BIN}" -m agent_env.nvidia_runtime --bundle-root "${NVIDIA_RENDER_ROOT}"
 
 # The runner is entirely local and should not inherit download proxies.
 unset http_proxy https_proxy ftp_proxy all_proxy no_proxy

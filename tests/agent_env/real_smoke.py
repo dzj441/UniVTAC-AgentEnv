@@ -133,6 +133,13 @@ def main() -> None:
     try:
         ready = client.result("ready")
         assert ready["level"] == args.level
+        variants = {
+            variant["title"]: variant
+            for variant in ready["command_schema"]["oneOf"]
+        }
+        assert "delta_position" in variants["act"]["required"]
+        assert variants["act"]["additionalProperties"] is False
+        assert "final_note" in variants["finish"]["required"]
         private_audit = run_dir / "evaluator_private_audit.json"
         assert not private_audit.exists()
 
@@ -205,6 +212,16 @@ def main() -> None:
         )
         assert manifest["profile"]["level"] == args.level
         assert manifest["initialization_reset_time_limit_seconds"] == 240.0
+        nvidia = manifest["nvidia_userspace"]
+        bundle_root = Path(nvidia["bundle_root"])
+        assert nvidia["all_nvidia_userspace_from_bundle"] is True
+        assert Path(nvidia["library_dir"]) == bundle_root / "runtime-libs-full"
+        mapped_driver_libraries = [
+            Path(path) for path in nvidia["mapped_driver_libraries"]
+        ]
+        assert mapped_driver_libraries
+        assert all(path.is_relative_to(bundle_root) for path in mapped_driver_libraries)
+        assert any(path.name.startswith("libcuda.so") for path in mapped_driver_libraries)
         assert saved_outcome["commitment_verified"] is True
         assert (run_dir / "agent_transcript.jsonl").is_file()
         assert private_audit.stat().st_mode & 0o777 == 0o600

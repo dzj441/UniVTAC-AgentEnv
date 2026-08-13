@@ -36,8 +36,14 @@ from agent_env.artifacts import (
     save_rgb,
     tensor_to_rgb,
 )
+from agent_env.contract import (
+    consume_private_evaluator_seed,
+    public_command_schema,
+    validate_command_fields,
+)
 from agent_env.profiles import AgentEnvProfile, get_profile
 from agent_env.protocol import EpisodeProtocol, PreparedDelta
+from agent_env.nvidia_runtime import audit_current_process
 from agent_env.serialization import serialize_observation
 
 from isaaclab.app import AppLauncher
@@ -46,6 +52,11 @@ from isaaclab.app import AppLauncher
 RESULT_PREFIX = "AGENT_ENV_RESULT "
 COMMITMENT_DOMAIN = "univtac.agent_env.grasp_classify.v0"
 RESET_TIME_LIMIT_SECONDS = 240.0
+
+# A controlled evaluator may select one seed for every Level in a matrix. Read
+# and remove it before AppLauncher starts any child tool. Only its commitment is
+# public before termination; the value itself is revealed in the outcome.
+PRIVATE_EVALUATOR_SEED = consume_private_evaluator_seed(os.environ)
 
 
 def parse_args() -> argparse.Namespace:
@@ -122,7 +133,7 @@ class GraspClassifyAgentEnv:
         self.private_audit_path = self.run_dir / "evaluator_private_audit.json"
         self.protocol = EpisodeProtocol(profile)
 
-        self._secret_seed = 10_000_000 + secrets.randbelow((2**31 - 1) - 10_000_000)
+        self._secret_seed = PRIVATE_EVALUATOR_SEED
         self._secret_salt = secrets.token_hex(32)
         self.seed_commitment = hashlib.sha256(
             f"{COMMITMENT_DOMAIN}|{self._secret_seed}|{self._secret_salt}".encode()
@@ -134,6 +145,8 @@ class GraspClassifyAgentEnv:
 
     def write_manifest(self) -> None:
         manifest = self.protocol.contract_manifest()
+        nvidia_bundle_root = Path(os.environ["UNIVTAC_NVIDIA_RENDER_ROOT"])
+        nvidia_runtime_audit = audit_current_process(nvidia_bundle_root)
         manifest.update(
             {
                 "created_utc": utc_now(),
@@ -144,6 +157,7 @@ class GraspClassifyAgentEnv:
                 "commitment_preimage_format": (
                     f"{COMMITMENT_DOMAIN}|<decimal_seed>|<hex_salt>"
                 ),
+                "command_schema": public_command_schema(),
                 "forbidden_agent_observations": [
                     "actor/object/pad pose",
                     "selected prism class before terminal outcome",
@@ -158,6 +172,14 @@ class GraspClassifyAgentEnv:
                     "the low-level command executed; it is not the task checker"
                 ),
                 "rendering": "official evaluator-compatible livestream=2 experience",
+                "nvidia_userspace": {
+                    "version": os.environ["UNIVTAC_NVIDIA_RENDER_VERSION"],
+                    "library_dir": os.environ["UNIVTAC_NVIDIA_USERSPACE_LIB_DIR"],
+                    "kernel_module_version_checked": os.environ[
+                        "UNIVTAC_NVIDIA_RENDER_VERSION"
+                    ],
+                    **nvidia_runtime_audit,
+                },
                 "initialization_reset_time_limit_seconds": self.task.cfg.reset_time_limit,
                 "replay_video": "H.264 yuv420p fast-start MP4 built only from public panels",
                 "audit_files": {
@@ -608,6 +630,7 @@ class GraspClassifyAgentEnv:
         }
 
     def handle(self, command: dict[str, Any]) -> dict[str, Any]:
+        validate_command_fields(command)
         name = command.get("command")
         if name == "start":
             return self.start(command)
@@ -696,6 +719,7 @@ def main() -> None:
             "capabilities": PROFILE.to_manifest(),
             "run_dir": str(run_dir.resolve()),
             "seed_commitment_sha256": env.seed_commitment,
+            "command_schema": public_command_schema(),
             "commands": [
                 "start",
                 "probe",
