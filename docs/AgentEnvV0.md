@@ -154,31 +154,97 @@ The API prevents accidental leakage. A truly adversarial agent must additionally
 run under a different UID/container because a same-UID coding agent could inspect
 simulator memory or private files outside the API.
 
-## TODO: isolated Codex operator and complete decision trace
+## Isolated Codex operator
 
-The current runner is the simulator-side protocol only; it does not yet launch
-an external Codex agent. Add an OpenETA-style orchestration layer with these
-separate, auditable boundaries:
+The host-side operator now launches Codex through `codex app-server --stdio`
+and gives it a fresh empty workspace and a temporary `CODEX_HOME`. Only
+`auth.json` is copied into that home; config, prior sessions, memories, MCP
+servers, plugins, skills, goals, and repository files are absent. The temporary
+home, including its authentication copy, is removed when the run ends.
 
-1. launch Codex through `codex app-server --listen stdio://` in a fresh empty
-   workspace and a fresh `CODEX_HOME`, reusing authentication only;
-2. expose only the selected AgentEnv Level through one typed MCP gateway, with
-   no repository, evaluator-private state, previous session, memory, or
-   unrelated MCP access;
-3. retain the Codex app-server event stream, the exact MCP requests/results and
-   images delivered to the agent, and the existing simulator transcript as
-   separate JSONL streams joined by timestamps and `observation_id`;
-4. require a structured `decision_record` before every prediction or physical
-   action, including visual evidence, tactile evidence when available,
-   alternatives considered, uncertainty, expected effect, chosen parameters,
-   and rationale;
-5. export an H.264 decision-trace video combining each public observation,
-   decision record, action, and returned feedback, while keeping it distinct
-   from any future continuous physics-step video.
+Codex does not receive the simulator's generic JSON transport. The host builds
+a Level-specific immutable dynamic-tool registry and relays only registered
+calls. The registry exposes bounded gripper probes, the irreversible
+classification commitment, bounded delta-EE control, physics wait, finish, and
+public status. It contains no IK, joint-target, object-pose, trajectory-planner,
+shell, file, web, app, plugin, skill, or subagent capability. Every call is
+validated by the host gateway and then validated independently by the simulator
+protocol. A shell/file/MCP/web/subagent or other non-embodied Codex event
+invalidates the episode instead of being approved.
 
-This can record every externally visible agent event and explicit decision
-note. It cannot expose model-internal hidden reasoning that the Codex protocol
-does not publish.
+The environment's internal controller may implement an accepted bounded
+delta-EE command using IK. That is an implementation detail behind the
+simulator boundary: the agent cannot invoke the IK solver, choose its solution,
+inspect its state, or send joint targets.
+
+Run one episode as follows:
+
+```bash
+./scripts/run_codex_agent_env.py \
+  --level 1 \
+  --device cuda:0 \
+  --run-dir agent_runs/example_level1
+```
+
+Use `--model MODEL` to pin a Codex model and `--effort high` (or another
+supported effort) to pin reasoning effort. `--dry-run` prints the exact public
+capability manifest without launching Codex or Isaac. Run Levels serially on
+this Isaac configuration; each simulator process uses `cuda:0` internally.
+
+### Codex audit artifacts
+
+In addition to the simulator artifacts listed above, the operator writes:
+
+- `codex_run_manifest.json`: model, effort, prompt/tool hashes, source revision,
+  isolation settings, and threat model;
+- `codex_capabilities.json`: exact Level-specific dynamic-tool contracts and
+  their SHA-256 commitment;
+- `codex_operator_prompt.txt`: exact model task prompt;
+- `codex_app_server_events.jsonl`: every published app-server request,
+  notification, and response, with image payload bytes omitted but hashed;
+- `codex_tool_calls.jsonl`: exact dynamic-tool arguments, translated simulator
+  command, scrubbed response, latency, and observation-id transition;
+- `codex_decisions.jsonl`: structured evidence, alternatives, uncertainty,
+  expected effect, exact parameter justification, and chosen command;
+- `codex_messages.jsonl`: published agent messages and reasoning summaries;
+- `capability_violations.jsonl`: fail-closed attempts to leave the embodied
+  capability surface;
+- `CODEX_TRACE.md`: a Chinese-readable, image-linked join of decisions, actions,
+  observations, feedback, messages, and terminal metrics;
+- `codex_run_outcome.json`: whether the episode is valid for scoring, terminal
+  capability audit, resolved model/reasoning settings, token usage,
+  accepted/rejected tool-call counts, and total wall time;
+- `codex_app_server_stderr.log` and `simulator_stdout.log`: process diagnostics.
+
+Every JSONL stream is append-only during the run and contains a per-event hash
+chain. The existing `agent_observations_h264.mp4` remains the browser-compatible
+H.264/yuv420p visual replay. These artifacts record every event Codex publishes
+and every explicit decision required by the tool schema. They cannot expose
+model-internal hidden chain-of-thought that the Codex protocol does not publish.
+Host-rejected attempts retain a decision record with `chosen_action=null`, so
+the rationale remains reviewable while the audit proves no simulator command
+was sent. The video has one frame per public observation; it is not yet a
+continuous physics-step recording.
+
+Tactile marker health is a reset-time rendering requirement and a per-frame
+diagnostic thereafter. A heavily loaded contact may legitimately merge marker
+components; the runner still publishes that observation after the action. It
+does not report `command_error` after the physical world has already changed.
+
+### Threat model
+
+The implemented boundary is suitable for a non-adversarial benchmark agent:
+the model sees only registered dynamic tools, has an empty read-only workspace,
+and never receives a simulator handle. This machine does not permit user/mount
+namespace creation. Therefore a deliberately malicious same-UID native process
+is not contained by this runner; a security-grade deployment must additionally
+place the Codex process under a separate UID or external container. The run
+manifest records this limitation rather than claiming container isolation.
+
+The design follows OpenETA's host-owned immutable `ToolSpec`/registry pattern
+and execution-time validation, while replacing OpenETA's unwired legacy Codex
+adapter with Codex app-server dynamic tools and a complete event recorder. See
+[Codex runner design](CodexAgentRunner.md) for the detailed mapping.
 
 ## Acceptance
 

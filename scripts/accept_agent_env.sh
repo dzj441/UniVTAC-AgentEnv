@@ -41,8 +41,15 @@ while (($#)); do
 done
 
 cd "${REPO_ROOT}"
-"${PYTHON_BIN}" -m py_compile agent_env/*.py scripts/grasp_classify_agent_env.py tests/agent_env/*.py
+"${PYTHON_BIN}" -m py_compile \
+  agent_env/*.py \
+  scripts/grasp_classify_agent_env.py \
+  scripts/run_codex_agent_env.py \
+  tests/agent_env/*.py
 "${PYTHON_BIN}" -m pytest tests/agent_env -q
+"${PYTHON_BIN}" scripts/run_codex_agent_env.py --level 1 --dry-run >/dev/null
+"${PYTHON_BIN}" scripts/run_codex_agent_env.py --level 2 --dry-run >/dev/null
+"${PYTHON_BIN}" scripts/run_codex_agent_env.py --level 3 --dry-run >/dev/null
 
 if [[ "${RUN_REAL}" == true ]]; then
   "${PYTHON_BIN}" tests/agent_env/real_smoke.py --level "${LEVEL}" --device "${DEVICE}"

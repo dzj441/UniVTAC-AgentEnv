@@ -32,6 +32,7 @@ import numpy as np
 from agent_env.artifacts import (
     encode_observation_video,
     marker_grid_health,
+    require_initial_tactile_health,
     save_composite,
     save_rgb,
     tensor_to_rgb,
@@ -221,7 +222,12 @@ class GraspClassifyAgentEnv:
         self._observation_index += 1
         return observation_id
 
-    def _capture_observation(self, observation_id: str) -> dict[str, Any]:
+    def _capture_observation(
+        self,
+        observation_id: str,
+        *,
+        initial_observation: bool = False,
+    ) -> dict[str, Any]:
         raw = self.task._get_observations()
         if raw.get("actor"):
             raise RuntimeError("Fairness violation: privileged actor observations are enabled")
@@ -250,8 +256,10 @@ class GraspClassifyAgentEnv:
                 "left": marker_grid_health(left),
                 "right": marker_grid_health(right),
             }
-            if not all(sensor["healthy"] for sensor in tactile_health.values()):
-                raise RuntimeError(f"Tactile marker-grid health check failed: {tactile_health}")
+            require_initial_tactile_health(
+                tactile_health,
+                initial_observation=initial_observation,
+            )
             modality_artifacts.update(
                 {
                     "left_tactile_marker": save_rgb(
@@ -318,7 +326,10 @@ class GraspClassifyAgentEnv:
 
         observation_id = self._next_observation_id()
         self.protocol.start(observation_id)
-        observation = self._capture_observation(observation_id)
+        observation = self._capture_observation(
+            observation_id,
+            initial_observation=True,
+        )
         self._record_private(
             "rollout_start",
             {

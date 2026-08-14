@@ -60,6 +60,24 @@ def marker_grid_health(array: np.ndarray) -> dict[str, Any]:
     }
 
 
+def require_initial_tactile_health(
+    tactile_health: dict[str, dict[str, Any]],
+    *,
+    initial_observation: bool,
+) -> None:
+    """Fail only when a broken tactile renderer is present at reset.
+
+    Strong contact can legitimately obscure or merge marker components. Once
+    an episode has started, that is observation data for recovery, not a reason
+    to discard an already executed action.
+    """
+
+    if initial_observation and not all(
+        bool(sensor.get("healthy")) for sensor in tactile_health.values()
+    ):
+        raise RuntimeError(f"Initial tactile marker-grid health check failed: {tactile_health}")
+
+
 def save_composite(
     panels: list[tuple[str, np.ndarray]],
     path: Path,
