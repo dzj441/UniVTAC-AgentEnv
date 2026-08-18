@@ -57,8 +57,9 @@ HTTP Range，可以在 VS Code/code-server 浏览器中拖动 H.264 视频进度
 - `单步聚焦`：补充显示当前动作的输入 observation，再依次显示 Agent 决策与动作后
   的 ENV 结果，适合逐动作检查。
 
-Head、wrist、左右 tactile 图按 Level 实际开放的模态显示。点击任意图可进入大图模式；
-键盘左右键可切换动作或大图。基础机器人状态和所有 raw JSON 默认折叠，但随时可展开。
+Head、wrist、左右 tactile 图按 Level/Profile 实际开放的模态显示。v1 记录还会显示
+米制 depth 预览、匿名 BBox/Mask，并可展开相机内外参与冻结后的机器人状态。点击任意图
+可进入大图模式；键盘左右键可切换动作或大图。所有 raw JSON 默认折叠，但随时可展开。
 
 ## 使用哪些落盘文件
 

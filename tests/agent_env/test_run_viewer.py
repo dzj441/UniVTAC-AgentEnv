@@ -205,6 +205,111 @@ def _make_capture_run(root: Path) -> Path:
     return run
 
 
+def _make_generic_capture_run(root: Path) -> Path:
+    run = root / "benchmark" / "pull_key_p6"
+    obs_dir = run / "observations" / "obs_000"
+    artifacts = {
+        "head": obs_dir / "head" / "rgb.png",
+        "depth": obs_dir / "head" / "depth_visualization.png",
+        "mask": obs_dir / "head" / "manipulated_object_mask.png",
+        "bbox": obs_dir / "head" / "goal_fixture_bbox_overlay.png",
+        "composite": obs_dir / "composite.png",
+    }
+    for path in artifacts.values():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"fake-png")
+
+    def artifact(name: str) -> dict:
+        return {
+            "artifact_id": artifacts[name].relative_to(run).as_posix(),
+            "sha256": name * 8,
+            "media_type": "image/png",
+        }
+
+    observation = {
+        "observation_id": "obs_000",
+        "task": "pull_out_key",
+        "observation_profile": "head_wrist_tactile_depth_intrinsics_extrinsics_state",
+        "modalities": {
+            "head_rgb": artifact("head"),
+            "head_depth": {
+                "visualization": artifact("depth"),
+                "visualization_range_m": {"near": 0.2, "far": 1.2},
+                "statistics": {"valid_fraction": 0.9},
+            },
+        },
+        "robot_state": {
+            "joint_position_9d": [0.0] * 9,
+            "joint_velocity_9d": [0.0] * 9,
+            "gripper_width_m": 0.02,
+            "end_effector_pose_robot_base_wxyz_7d": [0.35, 0.0, 0.2, 1, 0, 0, 0],
+        },
+        "camera_calibration": {
+            "head": {
+                "intrinsic_matrix_3x3": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+                "extrinsics": {"matrix_T_robot_base_camera_ros_4x4": [[1, 0, 0, 0]] * 4},
+            }
+        },
+        "annotations": {
+            "head": {
+                "manipulated_object": {"mask": artifact("mask")},
+                "goal_fixture": {
+                    "bbox_xyxy_exclusive": [1, 2, 3, 4],
+                    "bbox_overlay": artifact("bbox"),
+                },
+            }
+        },
+        "artifacts": {"composite": artifact("composite")},
+    }
+    profile = {
+        "index": 6,
+        "name": "head_wrist_tactile_depth_intrinsics_extrinsics_state",
+        "public_modalities": ["head_rgb", "head_depth"],
+        "public_robot_state": [
+            "joint_position_9d",
+            "joint_velocity_9d",
+            "gripper_width_m",
+            "end_effector_pose_robot_base_wxyz_7d",
+        ],
+        "metric_depth": True,
+        "camera_intrinsics": True,
+        "camera_extrinsics": True,
+        "task_success_during_episode": False,
+    }
+    _write_json(
+        run / "manifest.json",
+        {
+            "created_utc": "2026-08-18T00:00:00+00:00",
+            "task": {
+                "name": "pull_out_key",
+                "instruction": "Grasp and pull the key.",
+                "start_condition": "ungrasped",
+                "pre_move_enabled": False,
+            },
+            "start_condition": "ungrasped",
+            "pre_move_enabled": False,
+            "observation_profile": profile,
+        },
+    )
+    _write_jsonl(
+        run / "agent_transcript.jsonl",
+        [
+            {"timestamp_utc": "2026-08-18T00:00:00+00:00", "kind": "bridge_ready"},
+            {
+                "timestamp_utc": "2026-08-18T00:00:01+00:00",
+                "kind": "command",
+                "command": {"command": "start"},
+            },
+            {
+                "timestamp_utc": "2026-08-18T00:00:02+00:00",
+                "kind": "response",
+                "response": {"status": "rollout_started", "observation": observation},
+            },
+        ],
+    )
+    return run
+
+
 def test_public_viewer_url_resolves_code_server_template() -> None:
     template = "https://example.test/code/proxy/{{port}}/"
     assert public_viewer_url(8765, template) == "https://example.test/code/proxy/8765/"
@@ -312,6 +417,35 @@ def test_capture_detail_keeps_commands_but_does_not_invent_reasoning(tmp_path: P
     assert detail["steps"][0]["decision"] is None
     assert detail["steps"][0]["output_observation"]["observation_id"] == "obs_000"
     assert "没有 Codex" in detail["recording_note"]
+
+
+def test_generic_profile_depth_annotations_and_state_are_viewable(tmp_path: Path) -> None:
+    root = tmp_path / "agent_runs"
+    _make_generic_capture_run(root)
+    repository = RunRepository(root)
+    detail = repository.detail("benchmark/pull_key_p6")
+    assert detail["summary"]["task"] == "pull_out_key"
+    assert detail["summary"]["start_condition"] == "ungrasped"
+    assert detail["summary"]["pre_move_enabled"] is False
+    assert detail["summary"]["level"] == 6
+    assert detail["summary"]["profile"].endswith("extrinsics_state")
+    observation = detail["steps"][0]["output_observation"]
+    assert set(observation["modalities"]) == {
+        "head_rgb",
+        "head_depth",
+        "head_manipulated_object_mask",
+        "head_goal_fixture_bbox",
+    }
+    assert observation["modalities"]["head_depth"]["visualization_range_m"] == {
+        "near": 0.2,
+        "far": 1.2,
+    }
+    assert observation["robot_state"]["gripper_width_m"] == 0.02
+    assert observation["camera_calibration"]["head"]["intrinsic_matrix_3x3"][0][0] == 1
+    assert repository.resolve_artifact(
+        "benchmark/pull_key_p6",
+        "observations/obs_000/head/manipulated_object_mask.png",
+    ).is_file()
 
 
 def test_repository_rejects_path_escape_and_outside_symlink(tmp_path: Path) -> None:

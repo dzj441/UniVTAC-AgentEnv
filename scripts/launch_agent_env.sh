@@ -13,13 +13,26 @@ if [[ ! -x "${PYTHON_BIN}" ]]; then
 fi
 
 HAS_LEVEL=false
+HAS_TASK=false
+HAS_PROFILE=false
 for argument in "$@"; do
   case "${argument}" in
     --level|--level=*) HAS_LEVEL=true ;;
+    --task|--task=*) HAS_TASK=true ;;
+    --profile|--profile=*) HAS_PROFILE=true ;;
   esac
 done
-if [[ "${HAS_LEVEL}" != true ]]; then
-  echo "usage: $0 --level {1|2|3} [--device cuda:0] [--run-dir PATH]" >&2
+if [[ "${HAS_TASK}" == true || "${HAS_PROFILE}" == true ]]; then
+  if [[ "${HAS_TASK}" != true || "${HAS_PROFILE}" != true || "${HAS_LEVEL}" == true ]]; then
+    echo "generic usage: $0 --task TASK --profile {1..6} [--pre-move] [--provide-bbox] [--provide-mask] [--device cuda:0] [--run-dir PATH]" >&2
+    exit 2
+  fi
+  AGENT_ENV_RUNNER="scripts/embodied_agent_env.py"
+elif [[ "${HAS_LEVEL}" == true ]]; then
+  AGENT_ENV_RUNNER="scripts/grasp_classify_agent_env.py"
+else
+  echo "legacy usage: $0 --level {1|2|3} [--device cuda:0] [--run-dir PATH]" >&2
+  echo "generic usage: $0 --task TASK --profile {1..6} [--pre-move] [--provide-bbox] [--provide-mask] [--device cuda:0] [--run-dir PATH]" >&2
   exit 2
 fi
 
@@ -115,4 +128,4 @@ unset http_proxy https_proxy ftp_proxy all_proxy no_proxy
 unset HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY NO_PROXY
 
 cd "${REPO_ROOT}"
-exec "${PYTHON_BIN}" scripts/grasp_classify_agent_env.py "$@"
+exec "${PYTHON_BIN}" "${AGENT_ENV_RUNNER}" "$@"

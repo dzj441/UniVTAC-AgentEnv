@@ -348,7 +348,7 @@ def _tool_argument_lines(call: dict[str, Any]) -> list[str]:
         predicted = str(arguments.get("predicted_class") or "?").upper()
         pad = str(arguments.get("target_pad") or "?").upper()
         return [f"CLASS  {predicted}   ->   PAD  {pad}"]
-    if tool == "act_delta_ee":
+    if tool in {"act_delta_ee", "step_eef"}:
         return [
             f"POSITION DELTA  {_vector(arguments.get('delta_position'))} m",
             (

@@ -324,6 +324,116 @@ def summarize_codex_runtime(raw_path: Path) -> dict[str, Any]:
     return summary
 
 
+def token_budget_manifest(max_output_tokens: int | None) -> dict[str, Any]:
+    """Describe the episode-wide Codex output-token accounting contract.
+
+    Codex App Server reports ``reasoningOutputTokens`` as a subset of
+    ``outputTokens``.  The benchmark therefore checks ``outputTokens`` alone
+    instead of adding the two values and double-counting hidden reasoning.
+    """
+
+    if max_output_tokens is not None and (
+        isinstance(max_output_tokens, bool)
+        or not isinstance(max_output_tokens, int)
+        or max_output_tokens <= 0
+    ):
+        raise ValueError("max_output_tokens must be a positive integer or None")
+    return {
+        "configured": max_output_tokens is not None,
+        "metric": "codex_app_server.token_usage.total.outputTokens",
+        "max_output_tokens": max_output_tokens,
+        "enforcement": "posthoc_terminal_checker",
+        "scope": "single episode / single Codex thread and turn",
+        "disclosed_to_agent": max_output_tokens is not None,
+        "reasoning_output_tokens_are_subset": True,
+    }
+
+
+def check_token_budget(
+    runtime_summary: dict[str, Any] | None,
+    max_output_tokens: int | None,
+) -> dict[str, Any]:
+    """Compare terminal cumulative App Server usage with an optional budget."""
+
+    check = token_budget_manifest(max_output_tokens)
+    runtime = runtime_summary if isinstance(runtime_summary, dict) else {}
+    usage = runtime.get("token_usage")
+    usage = usage if isinstance(usage, dict) else {}
+    total = usage.get("total")
+    total = total if isinstance(total, dict) else {}
+
+    def usage_count(key: str) -> int | None:
+        value = total.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+        return value
+
+    observed = usage_count("outputTokens")
+    reasoning = usage_count("reasoningOutputTokens")
+    measurement_available = observed is not None
+    configured = max_output_tokens is not None
+    within_budget = (
+        observed <= max_output_tokens
+        if configured and measurement_available and max_output_tokens is not None
+        else None
+    )
+    if not configured:
+        budget_passed = True
+        failure_reason = None
+    elif not measurement_available:
+        budget_passed = False
+        failure_reason = "token_usage_unavailable"
+    elif within_budget:
+        budget_passed = True
+        failure_reason = None
+    else:
+        budget_passed = False
+        failure_reason = "token_budget_exceeded"
+
+    check.update(
+        {
+            "measurement_available": measurement_available,
+            "observed_output_tokens": observed,
+            "observed_reasoning_output_tokens": reasoning,
+            "within_budget": within_budget,
+            "budget_passed": budget_passed,
+            "failure_reason": failure_reason,
+        }
+    )
+    return check
+
+
+def build_benchmark_score(
+    *,
+    valid_for_scoring: bool,
+    official_task_success: object,
+    token_budget_check: dict[str, Any],
+) -> dict[str, Any]:
+    """Combine task success and the orthogonal token-budget diagnostic axis."""
+
+    task_success = (
+        official_task_success if isinstance(official_task_success, bool) else None
+    )
+    budget_passed = token_budget_check.get("budget_passed") is True
+    benchmark_success = bool(valid_for_scoring and task_success is True and budget_passed)
+    failure_reasons: list[str] = []
+    if not valid_for_scoring:
+        failure_reasons.append("run_not_scorable")
+    if task_success is False:
+        failure_reasons.append("task_failure")
+    elif task_success is None:
+        failure_reasons.append("task_outcome_unavailable")
+    budget_failure = token_budget_check.get("failure_reason")
+    if isinstance(budget_failure, str):
+        failure_reasons.append(budget_failure)
+    return {
+        "official_task_success": task_success,
+        "token_budget_passed": budget_passed,
+        "benchmark_success": benchmark_success,
+        "failure_reasons": failure_reasons,
+    }
+
+
 def summarize_tool_calls(tool_path: Path) -> dict[str, int]:
     """Count relayed, host-rejected, successful, and failed tool attempts."""
 
@@ -371,6 +481,41 @@ def build_human_trace(
         token_total = token_total.get("total")
     if not isinstance(token_total, dict):
         token_total = {}
+    budget_manifest = manifest.get("inference_budget")
+    budget_manifest = budget_manifest if isinstance(budget_manifest, dict) else {}
+    budget_limit = budget_manifest.get("max_output_tokens")
+    if (
+        isinstance(budget_limit, bool)
+        or not isinstance(budget_limit, int)
+        or budget_limit <= 0
+    ):
+        budget_limit = None
+    budget_check = check_token_budget(runtime, budget_limit)
+    budget_label = (
+        f"{budget_limit} output tokens"
+        if budget_limit is not None
+        else "unlimited"
+    )
+    task_value = manifest.get("task", "grasp_classify")
+    task_name = (
+        task_value.get("name", "unknown")
+        if isinstance(task_value, dict)
+        else task_value
+    )
+    task_manifest = task_value if isinstance(task_value, dict) else {}
+    start_condition = (
+        manifest.get("start_condition")
+        or task_manifest.get("start_condition")
+        or "legacy/unknown"
+    )
+    profile_value = manifest.get("observation_profile")
+    if not isinstance(profile_value, dict):
+        profile_value = manifest.get("profile")
+    profile_value = profile_value if isinstance(profile_value, dict) else {}
+    profile_index = manifest.get("level") or profile_value.get("index") or profile_value.get(
+        "level", "unknown"
+    )
+    profile_name = profile_value.get("name", "unknown")
     lines = [
         "# Codex Agent Rollout 复盘",
         "",
@@ -379,8 +524,9 @@ def build_human_trace(
         "",
         "## 运行信息",
         "",
-        f"- Task：`{manifest.get('task', 'grasp_classify')}`",
-        f"- Level：`{manifest.get('level', 'unknown')}`",
+        f"- Task：`{task_name}`",
+        f"- Start condition：`{start_condition}`",
+        f"- Observation profile：`P{profile_index}` / `{profile_name}`",
         f"- Requested model：`{manifest.get('model', 'unknown')}`",
         f"- Actual model：`{runtime.get('actual_model') or 'unknown'}`",
         f"- Effort：`{manifest.get('effort', 'unknown')}`",
@@ -388,6 +534,11 @@ def build_human_trace(
         f"`{token_total.get('cachedInputTokens', 'unknown')}`",
         f"- Output / reasoning output tokens：`{token_total.get('outputTokens', 'unknown')}` / "
         f"`{token_total.get('reasoningOutputTokens', 'unknown')}`",
+        f"- Token budget：`{budget_label}` / enforcement "
+        f"`{budget_check['enforcement']}`",
+        f"- Token budget result：observed "
+        f"`{budget_check['observed_output_tokens']}` / passed "
+        f"`{budget_check['budget_passed']}`",
         f"- Capability manifest：`{manifest.get('capability_manifest_sha256', 'unknown')}`",
         "",
         "## 多轮交互时间线",
@@ -504,16 +655,23 @@ def build_human_trace(
             )
 
     if evaluator:
+        lines.extend(["## 终局评测", ""])
+        if "predicted_class" in evaluator:
+            lines.extend(
+                [
+                    f"- Predicted / true：`{evaluator.get('predicted_class')}` / "
+                    f"`{evaluator.get('true_class')}`",
+                    f"- Committed / expected target：`{evaluator.get('committed_target')}` / "
+                    f"`{evaluator.get('expected_target')}`",
+                    f"- Classification correct：`{evaluator.get('classification_correct')}`",
+                ]
+            )
         lines.extend(
             [
-                "## 终局评测",
-                "",
-                f"- Predicted / true：`{evaluator.get('predicted_class')}` / "
-                f"`{evaluator.get('true_class')}`",
-                f"- Committed / expected target：`{evaluator.get('committed_target')}` / "
-                f"`{evaluator.get('expected_target')}`",
-                f"- Classification correct：`{evaluator.get('classification_correct')}`",
+                f"- Task：`{evaluator.get('task', task_name)}`",
                 f"- Official task success：`{evaluator.get('official_task_success')}`",
+                f"- Accepted step_eef：`{evaluator.get('step_eef_count', 'n/a')}`",
+                f"- Evaluator checks：`{json.dumps(evaluator.get('evaluator_checks', {}), ensure_ascii=False)}`",
                 f"- Wall time：`{evaluator.get('wall_seconds')}` s",
                 "",
             ]
@@ -571,18 +729,17 @@ def _compact_response(value: Any) -> Any:
         return value
     output: dict[str, Any] = {}
     for key, child in value.items():
-        if key == "modalities" and isinstance(child, dict):
-            output[key] = {
-                name: {
-                    "artifact_id": artifact.get("artifact_id"),
-                    "sha256": artifact.get("sha256"),
-                }
-                for name, artifact in child.items()
-                if isinstance(artifact, dict)
-            }
-        elif key == "observation":
+        if key == "observation":
             output[key] = _compact_response(child)
-        elif key in {"last_action", "feedback", "robot_state", "tactile_health"}:
+        elif key in {
+            "last_action",
+            "feedback",
+            "robot_state",
+            "tactile_health",
+            "modalities",
+            "camera_calibration",
+            "annotations",
+        }:
             output[key] = _compact_response(child)
         elif key not in {"artifacts"}:
             output[key] = _compact_response(child)
@@ -591,24 +748,27 @@ def _compact_response(value: Any) -> Any:
 
 def _observation_artifacts(value: Any) -> list[tuple[str, str]]:
     found: list[tuple[str, str]] = []
-    if isinstance(value, list):
-        for item in value:
-            found.extend(_observation_artifacts(item))
-        return found
-    if not isinstance(value, dict):
-        return found
-    modalities = value.get("modalities")
-    if isinstance(modalities, dict):
-        for name, artifact in modalities.items():
-            if isinstance(artifact, dict) and isinstance(artifact.get("artifact_id"), str):
-                found.append((str(name), artifact["artifact_id"]))
-    artifact_id = value.get("artifact_id")
-    if isinstance(artifact_id, str):
-        label = str(value.get("kind") or value.get("label") or Path(artifact_id).stem)
-        found.append((label, artifact_id))
-    for key, child in value.items():
-        if key != "modalities":
-            found.extend(_observation_artifacts(child))
+
+    def visit(child: Any, label: str = "artifact") -> None:
+        if isinstance(child, list):
+            for index, item in enumerate(child):
+                visit(item, f"{label}.{index}")
+            return
+        if not isinstance(child, dict):
+            return
+        artifact_id = child.get("artifact_id")
+        if isinstance(artifact_id, str) and Path(artifact_id).suffix.lower() in {
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".webp",
+        }:
+            found.append((label, artifact_id))
+        for key, item in child.items():
+            if key not in {"artifact_id", "sha256", "media_type"}:
+                visit(item, str(key) if label == "artifact" else f"{label}.{key}")
+
+    visit(value)
     deduplicated: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for item in found:

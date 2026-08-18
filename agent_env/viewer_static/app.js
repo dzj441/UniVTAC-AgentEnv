@@ -60,6 +60,10 @@ const modalityLabels = {
   wrist_rgb: "Wrist RGB",
   left_tactile_marker: "Left tactile",
   right_tactile_marker: "Right tactile",
+  left_tactile_rgb: "Left tactile",
+  right_tactile_rgb: "Right tactile",
+  head_depth: "Head metric depth",
+  wrist_depth: "Wrist metric depth",
 };
 
 const modalityOrder = [
@@ -67,7 +71,23 @@ const modalityOrder = [
   "wrist_rgb",
   "left_tactile_marker",
   "right_tactile_marker",
+  "left_tactile_rgb",
+  "right_tactile_rgb",
+  "head_depth",
+  "wrist_depth",
 ];
+
+function modalityLabel(name) {
+  if (modalityLabels[name]) return modalityLabels[name];
+  return name
+    .replaceAll("_manipulated_object_", " · manipulated object · ")
+    .replaceAll("_goal_fixture_", " · goal fixture · ")
+    .replaceAll("_", " ");
+}
+
+function profilePrefix(run) {
+  return ["pull_out_key", "put_bottle_in_shelf"].includes(run.task) ? "P" : "L";
+}
 
 function node(tag, options = {}, children = []) {
   const element = document.createElement(tag);
@@ -209,6 +229,7 @@ function matchesSearch(run) {
     run.name,
     run.group,
     run.profile,
+    run.start_condition,
     run.model,
     `level ${run.level}`,
     outcomeLabel(run),
@@ -250,7 +271,7 @@ function renderRunList() {
     const title = node("div", { className: "run-item-title", text: run.name });
     const badge = node("span", {
       className: "level-badge",
-      text: run.level ? `L${run.level}` : "CAP",
+      text: run.level ? `${profilePrefix(run)}${run.level}` : "CAP",
     });
     button.append(node("div", { className: "run-item-top" }, [title, badge]));
     const result = node("span", {
@@ -341,9 +362,11 @@ function renderDetail() {
   const detail = state.detail;
   const run = detail.summary;
   refs.runCrumbs.textContent = run.id;
-  refs.runTitle.textContent = run.level ? `${run.name} · Level ${run.level}` : run.name;
+  refs.runTitle.textContent = run.level
+    ? `${run.name} · ${profilePrefix(run) === "P" ? "Profile" : "Level"} ${run.level}`
+    : run.name;
   refs.runKind.textContent = run.kind === "codex" ? "CODEX RUN" : "ENV CAPTURE";
-  refs.runSubtitle.textContent = `${run.task} · ${run.profile || "unknown profile"} · ${formatDate(run.created_utc)}`;
+  refs.runSubtitle.textContent = `${run.task} · ${run.start_condition || "legacy start"} · ${run.profile || "unknown profile"} · ${formatDate(run.created_utc)}`;
 
   renderArtifactActions(detail.artifacts);
   renderResultStrip(run, detail.outcome);
@@ -377,7 +400,12 @@ function renderArtifactActions(artifacts) {
 
 function renderResultStrip(run, outcome) {
   refs.resultStrip.replaceChildren();
-  refs.resultStrip.append(resultChip(`Level ${run.level ?? "—"}`, "info"));
+  refs.resultStrip.append(
+    resultChip(`${profilePrefix(run) === "P" ? "Profile" : "Level"} ${run.level ?? "—"}`, "info"),
+  );
+  if (run.start_condition) {
+    refs.resultStrip.append(resultChip(`Start · ${run.start_condition}`, "info"));
+  }
   if (run.valid_for_scoring !== null && run.valid_for_scoring !== undefined) {
     refs.resultStrip.append(
       resultChip(run.valid_for_scoring ? "Scoring trace 有效" : "不可计分", run.valid_for_scoring ? "good" : "bad"),
@@ -431,7 +459,18 @@ function renderCapabilities(profile = {}) {
   for (const item of profile.public_modalities || []) {
     refs.capabilityRow.append(node("span", { className: "capability-chip", text: item }));
   }
-  if (profile.expose_task_success_after_prediction) {
+  if (profile.metric_depth) {
+    refs.capabilityRow.append(node("span", { className: "capability-chip", text: "metric depth" }));
+  }
+  if (profile.camera_intrinsics) {
+    refs.capabilityRow.append(node("span", { className: "capability-chip", text: "camera intrinsics" }));
+  }
+  if (profile.camera_extrinsics) {
+    refs.capabilityRow.append(node("span", { className: "capability-chip", text: "camera extrinsics" }));
+  }
+  if (profile.task_success_during_episode === false) {
+    refs.capabilityRow.append(node("span", { className: "capability-chip", text: "success terminal-only" }));
+  } else if (profile.expose_task_success_after_prediction) {
     refs.capabilityRow.append(node("span", { className: "capability-chip", text: "post-commit success" }));
   }
   if (!refs.capabilityRow.children.length) {
@@ -462,12 +501,22 @@ function renderPrompt(prompt, profile, kind) {
   card.append(node("h4", { text: profile.name || "Capability profile" }));
   card.append(node("p", { text: profile.description || "没有 profile 描述。" }));
   const list = node("ul");
-  list.append(node("li", { text: `触觉：${profile.expose_tactile ? "开放" : "不开放"}` }));
-  list.append(
-    node("li", {
-      text: `Success guidance：${profile.expose_task_success_after_prediction ? "commit 后开放" : "不开放"}`,
-    }),
-  );
+  const modalities = profile.public_modalities || [];
+  const tactile = profile.expose_tactile ?? modalities.some((item) => item.includes("tactile"));
+  list.append(node("li", { text: `触觉：${tactile ? "开放" : "不开放"}` }));
+  const terminalOnly = profile.task_success_during_episode === false;
+  const legacySuccess = profile.expose_task_success_after_prediction;
+  list.append(node("li", {
+    text: `Success feedback：${terminalOnly ? "仅 finish 后公开" : legacySuccess ? "commit 后开放" : "不开放"}`,
+  }));
+  if (profile.metric_depth !== undefined) {
+    list.append(node("li", { text: `米制深度：${profile.metric_depth ? "开放" : "不开放"}` }));
+  }
+  if (profile.camera_intrinsics !== undefined || profile.camera_extrinsics !== undefined) {
+    list.append(node("li", {
+      text: `相机标定：内参 ${profile.camera_intrinsics ? "开放" : "关闭"} / 外参 ${profile.camera_extrinsics ? "开放" : "关闭"}`,
+    }));
+  }
   list.append(node("li", { text: `基础机器人状态：${(profile.public_robot_state || []).length} 项` }));
   card.append(list);
   refs.profileDetail.append(card);
@@ -678,7 +727,7 @@ function actionChips(step) {
     chips.push(`Δ gripper ${formatSigned(Number(args.delta_gripper) * 1000, 2)} mm`);
   } else if (step.tool === "commit_classification") {
     chips.push(`${args.predicted_class ?? "?"} → ${args.target_pad ?? "?"}`);
-  } else if (step.tool === "act_delta_ee") {
+  } else if (step.tool === "act_delta_ee" || step.tool === "step_eef") {
     if (Array.isArray(args.delta_position)) {
       chips.push(`ΔXYZ [${args.delta_position.map((item) => formatSigned(Number(item) * 100, 1)).join(", ")}] cm`);
     }
@@ -782,7 +831,8 @@ function renderFeedback(step) {
     text: step.execution_target === "perception" ? "PERCEPTION RESULT" : "SIMULATOR FEEDBACK",
   }));
   const parts = [];
-  if (feedback.execution_succeeded !== undefined) parts.push(`execution_succeeded=${feedback.execution_succeeded}`);
+  const executionSucceeded = feedback.execution_succeeded ?? response.execution_succeeded;
+  if (executionSucceeded !== undefined) parts.push(`execution_succeeded=${executionSucceeded}`);
   if (feedback.task_success !== undefined) parts.push(`task_success=${feedback.task_success}`);
   if (response.remaining_probes !== undefined) parts.push(`remaining_probes=${response.remaining_probes}`);
   if (response.predicted_class) parts.push(`committed ${response.predicted_class} → ${response.committed_target}`);
@@ -871,33 +921,41 @@ function renderObservation(observation, title) {
     node("strong", { text: observation.observation_id }),
     node("span", { text: observation.stage || "unknown stage" }),
   ]);
+  const legacyCounts = observation.probe_count !== null && observation.probe_count !== undefined;
   const counts = node("span", {
     className: "observation-counts",
-    text: `probe ${observation.probe_count ?? "—"} · action ${observation.post_prediction_action_count ?? "—"}`,
+    text: legacyCounts
+      ? `probe ${observation.probe_count ?? "—"} · action ${observation.post_prediction_action_count ?? "—"}`
+      : observation.profile || "generic embodied observation",
   });
   block.append(node("header", { className: "observation-header" }, [obsTitle, counts]));
 
-  const entries = Object.entries(observation.modalities || {}).sort(
-    ([a], [b]) => modalityOrder.indexOf(a) - modalityOrder.indexOf(b),
-  );
+  const entries = Object.entries(observation.modalities || {}).sort(([a], [b]) => {
+    const aIndex = modalityOrder.indexOf(a);
+    const bIndex = modalityOrder.indexOf(b);
+    if (aIndex === -1 && bIndex === -1) return a.localeCompare(b);
+    if (aIndex === -1) return 1;
+    if (bIndex === -1) return -1;
+    return aIndex - bIndex;
+  });
   const lightboxItems = entries.map(([name, meta]) => ({
     src: artifactUrl(meta.artifact),
-    title: `${observation.observation_id} · ${modalityLabels[name] || name}`,
+    title: `${observation.observation_id} · ${modalityLabel(name)}`,
   }));
   if (entries.length) {
     const grid = node("div", { className: "sensor-grid" });
     entries.forEach(([name, metadata], index) => {
       const image = node("img");
       image.src = artifactUrl(metadata.artifact);
-      image.alt = `${observation.observation_id} ${modalityLabels[name] || name}`;
+      image.alt = `${observation.observation_id} ${modalityLabel(name)}`;
       image.loading = "lazy";
       image.decoding = "async";
       const card = node("button", {
         className: "sensor-card",
         type: "button",
-        ariaLabel: `放大 ${modalityLabels[name] || name}`,
+        ariaLabel: `放大 ${modalityLabel(name)}`,
         onClick: () => openLightbox(lightboxItems, index),
-      }, [image, node("span", { className: "sensor-label", text: modalityLabels[name] || name })]);
+      }, [image, node("span", { className: "sensor-label", text: modalityLabel(name) })]);
       grid.append(card);
     });
     block.append(grid);
@@ -915,11 +973,21 @@ function renderObservation(observation, title) {
       }),
     );
   }
-  if (Array.isArray(robot.end_effector_pose_robot_base_7d)) {
+  if (Number.isFinite(Number(robot.gripper_width_m))) {
     stateChips.append(
       node("span", {
         className: "state-chip",
-        text: `EE xyz [${robot.end_effector_pose_robot_base_7d
+        text: `gripper width ${(Number(robot.gripper_width_m) * 1000).toFixed(3)} mm`,
+      }),
+    );
+  }
+  const endEffectorPose = robot.end_effector_pose_robot_base_wxyz_7d
+    || robot.end_effector_pose_robot_base_7d;
+  if (Array.isArray(endEffectorPose)) {
+    stateChips.append(
+      node("span", {
+        className: "state-chip",
+        text: `EE xyz [${endEffectorPose
           .slice(0, 3)
           .map((item) => Number(item).toFixed(4))
           .join(", ")}] m`,
@@ -949,7 +1017,7 @@ function renderObservation(observation, title) {
     meta.append(
       node("button", {
         className: "composite-link",
-        text: "单独查看四面板 composite ↗",
+        text: "单独查看完整 observation composite ↗",
         type: "button",
         onClick: () =>
           openLightbox(
@@ -963,6 +1031,18 @@ function renderObservation(observation, title) {
   details.append(node("summary", { text: "完整基础机器人状态" }));
   details.append(node("pre", { text: prettyJson(robot) }));
   meta.append(details);
+  if (Object.keys(observation.camera_calibration || {}).length) {
+    const calibration = node("details", { className: "robot-details" });
+    calibration.append(node("summary", { text: "相机内外参" }));
+    calibration.append(node("pre", { text: prettyJson(observation.camera_calibration) }));
+    meta.append(calibration);
+  }
+  if (Object.keys(observation.annotations || {}).length) {
+    const annotations = node("details", { className: "robot-details" });
+    annotations.append(node("summary", { text: "匿名 BBox / Mask 元数据" }));
+    annotations.append(node("pre", { text: prettyJson(observation.annotations) }));
+    meta.append(annotations);
+  }
   block.append(meta);
   return block;
 }

@@ -126,6 +126,25 @@ def test_toolcall_frame_preserves_observation_and_adds_even_width_panel(
     assert frame.getpixel((1000, 80)) == (15, 118, 110)
 
 
+def test_generic_step_eef_uses_the_numeric_action_renderer(tmp_path: Path) -> None:
+    composite = tmp_path / "composite.png"
+    Image.new("RGB", (960, 294), (20, 40, 60)).save(composite)
+    call = {
+        "tool": "step_eef",
+        "success": True,
+        "prior_observation_id": "obs_000",
+        "next_observation_id": "obs_001",
+        "arguments": {
+            "observation_id": "obs_000",
+            "delta_position": [0.01, -0.02, 0.03],
+            "delta_rpy": [0.1, 0.0, -0.1],
+            "delta_gripper": 0.005,
+        },
+    }
+    frame = render_observation_toolcall_frame(composite, "obs_000", [call])
+    assert frame.size == (1920, 480)
+
+
 def test_video_font_loader_honors_requested_size() -> None:
     small = artifacts._font(14, bold=True)
     large = artifacts._font(28, bold=True)

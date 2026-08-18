@@ -7,13 +7,19 @@
 
 ## Installation
 
+The current agentic embodied benchmark uses six observation profiles, an
+independent anonymous BBox/Mask diagnostic axis, and one bounded EEF action
+surface on `pull_out_key` and `put_bottle_in_shelf`. See
+[Embodied Benchmark v1](docs/EmbodiedBenchmarkV1.md).
+
 For the experimental three-level, agent-facing `grasp_classify` interface, see
 [Grasp-Classify AgentEnv v0](docs/AgentEnvV0.md). The isolated Codex operator,
 Level-scoped dynamic tools, and complete decision/event trace are documented in
 [Codex embodied-agent runner](docs/CodexAgentRunner.md).
 
-Optional, fairness-gated SAM 3 segmentation and UniDepth V2 predicted-depth
-tools are documented in [Semantic Perception Tools](docs/SemanticPerceptionTools.md).
+The older, optional SAM 3 and UniDepth V2 model-derived tools are documented in
+[Semantic Perception Tools](docs/SemanticPerceptionTools.md). They are not part
+of the v1 main observation profiles, which use simulator-native oracle assets.
 
 Replay completed or in-progress AgentEnv/Codex records in the browser with the
 [Agent Run Viewer](docs/AgentRunViewer.md):

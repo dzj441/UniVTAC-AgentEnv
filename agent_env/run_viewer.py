@@ -26,6 +26,7 @@ TOOL_LABELS = {
     "probe_gripper": "触觉/夹爪探测",
     "commit_classification": "锁定分类与目标",
     "act_delta_ee": "执行末端增量动作",
+    "step_eef": "执行末端增量动作",
     "wait_physics": "等待物理稳定",
     "finish_episode": "提交终局评测",
     "inspect_episode_status": "读取公开状态",
@@ -45,6 +46,7 @@ TRANSCRIPT_TOOL_NAMES = {
     "probe": "probe_gripper",
     "submit_prediction": "commit_classification",
     "act": "act_delta_ee",
+    "step": "step_eef",
     "wait": "wait_physics",
     "finish": "finish_episode",
     "status": "inspect_episode_status",
@@ -127,11 +129,36 @@ def _iso_elapsed(timestamp: Any, origin: Any) -> float:
 
 
 def _profile_from(manifest: dict[str, Any], fallback: dict[str, Any]) -> dict[str, Any]:
-    profile = manifest.get("profile")
-    if isinstance(profile, dict):
-        return profile
-    profile = fallback.get("profile")
-    return profile if isinstance(profile, dict) else {}
+    for source in (manifest, fallback):
+        for key in ("observation_profile", "profile"):
+            profile = source.get(key)
+            if isinstance(profile, dict):
+                return profile
+    return {}
+
+
+def _task_name(value: Any, default: str = "grasp_classify") -> str:
+    if isinstance(value, dict) and isinstance(value.get("name"), str):
+        return value["name"]
+    if isinstance(value, str) and value:
+        return value
+    return default
+
+
+def _viewable_artifact(run_dir: Path, value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    artifact = _relative_artifact(
+        run_dir,
+        value.get("artifact_id") or value.get("path"),
+    )
+    if artifact is None:
+        return None
+    return {
+        "artifact": artifact,
+        "sha256": value.get("sha256"),
+        "media_type": value.get("media_type"),
+    }
 
 
 def _relative_artifact(run_dir: Path, value: Any) -> str | None:
@@ -161,15 +188,29 @@ def _normalize_observation(value: Any, run_dir: Path) -> dict[str, Any] | None:
     for name, metadata in raw_modalities.items():
         if not isinstance(metadata, dict):
             continue
-        artifact = _relative_artifact(
-            run_dir,
-            metadata.get("artifact_id") or metadata.get("path"),
-        )
-        if artifact is not None:
-            modalities[str(name)] = {
-                "artifact": artifact,
-                "sha256": metadata.get("sha256"),
-            }
+        viewable = _viewable_artifact(run_dir, metadata)
+        if viewable is None and isinstance(metadata.get("visualization"), dict):
+            viewable = _viewable_artifact(run_dir, metadata["visualization"])
+            if viewable is not None:
+                viewable["visualization_range_m"] = metadata.get(
+                    "visualization_range_m"
+                )
+                viewable["statistics"] = metadata.get("statistics")
+        if viewable is not None:
+            modalities[str(name)] = viewable
+
+    raw_annotations = value.get("annotations")
+    if isinstance(raw_annotations, dict):
+        for camera, roles in raw_annotations.items():
+            if not isinstance(roles, dict):
+                continue
+            for role, annotation in roles.items():
+                if not isinstance(annotation, dict):
+                    continue
+                for feature, suffix in (("bbox_overlay", "bbox"), ("mask", "mask")):
+                    viewable = _viewable_artifact(run_dir, annotation.get(feature))
+                    if viewable is not None:
+                        modalities[f"{camera}_{role}_{suffix}"] = viewable
 
     composite: str | None = None
     artifacts = value.get("artifacts")
@@ -183,13 +224,18 @@ def _normalize_observation(value: Any, run_dir: Path) -> dict[str, Any] | None:
     normalized = {
         "observation_id": value["observation_id"],
         "level": value.get("level"),
-        "profile": value.get("profile"),
+        "profile": value.get("observation_profile") or value.get("profile"),
+        "task": value.get("task"),
         "stage": value.get("stage"),
         "probe_count": value.get("probe_count"),
         "post_prediction_action_count": value.get("post_prediction_action_count"),
         "modalities": modalities,
         "composite": composite,
         "robot_state": raw_robot_state,
+        "camera_calibration": value.get("camera_calibration")
+        if isinstance(value.get("camera_calibration"), dict)
+        else {},
+        "annotations": raw_annotations if isinstance(raw_annotations, dict) else {},
         "tactile_health": value.get("tactile_health")
         if isinstance(value.get("tactile_health"), dict)
         else {},
@@ -341,25 +387,40 @@ def _state_delta(
     if not isinstance(before_state, dict) or not isinstance(after_state, dict):
         return {}
     result: dict[str, Any] = {}
-    if isinstance(before_state.get("gripper_qpos"), (int, float)) and isinstance(
-        after_state.get("gripper_qpos"), (int, float)
-    ):
-        delta = float(after_state["gripper_qpos"]) - float(before_state["gripper_qpos"])
+    before_gripper = before_state.get("gripper_width_m", before_state.get("gripper_qpos"))
+    after_gripper = after_state.get("gripper_width_m", after_state.get("gripper_qpos"))
+    if isinstance(before_gripper, (int, float)) and isinstance(after_gripper, (int, float)):
+        delta = float(after_gripper) - float(before_gripper)
         result["gripper_delta_m"] = delta
         result["gripper_delta_mm"] = delta * 1000.0
-    before_pose = _numeric_vector(before_state.get("end_effector_pose_robot_base_7d"), 3)
-    after_pose = _numeric_vector(after_state.get("end_effector_pose_robot_base_7d"), 3)
+    before_pose = _numeric_vector(
+        before_state.get(
+            "end_effector_pose_robot_base_wxyz_7d",
+            before_state.get("end_effector_pose_robot_base_7d"),
+        ),
+        3,
+    )
+    after_pose = _numeric_vector(
+        after_state.get(
+            "end_effector_pose_robot_base_wxyz_7d",
+            after_state.get("end_effector_pose_robot_base_7d"),
+        ),
+        3,
+    )
     if before_pose is not None and after_pose is not None:
         delta_xyz = [after_pose[i] - before_pose[i] for i in range(3)]
         result["end_effector_delta_xyz_m"] = delta_xyz
         result["end_effector_translation_m"] = math.sqrt(
             sum(component * component for component in delta_xyz)
         )
-    before_joints = _numeric_vector(before_state.get("joint_position_8d"), 8)
-    after_joints = _numeric_vector(after_state.get("joint_position_8d"), 8)
+    before_joint_value = before_state.get("joint_position_9d", before_state.get("joint_position_8d"))
+    after_joint_value = after_state.get("joint_position_9d", after_state.get("joint_position_8d"))
+    joint_length = 9 if isinstance(before_joint_value, list) and len(before_joint_value) >= 9 else 8
+    before_joints = _numeric_vector(before_joint_value, joint_length)
+    after_joints = _numeric_vector(after_joint_value, joint_length)
     if before_joints is not None and after_joints is not None:
         result["max_abs_joint_delta"] = max(
-            abs(after_joints[i] - before_joints[i]) for i in range(8)
+            abs(after_joints[i] - before_joints[i]) for i in range(joint_length)
         )
     return result
 
@@ -544,6 +605,12 @@ def _selected_outcome(value: dict[str, Any]) -> dict[str, Any]:
     keys = (
         "timestamp_utc",
         "terminal_reason",
+        "task",
+        "start_condition",
+        "pre_move_enabled",
+        "observation_profile",
+        "profile_index",
+        "annotations",
         "level",
         "profile",
         "predicted_class",
@@ -553,6 +620,8 @@ def _selected_outcome(value: dict[str, Any]) -> dict[str, Any]:
         "expected_target",
         "committed_pad_correct",
         "official_task_success",
+        "evaluator_checks",
+        "step_eef_count",
         "probe_count",
         "post_prediction_action_count",
         "sim_action_count",
@@ -677,8 +746,11 @@ class RunRepository:
         profile = _profile_from(codex_manifest, env_manifest)
         level = (
             codex_manifest.get("level")
+            or profile.get("index")
             or profile.get("level")
+            or evaluator.get("profile_index")
             or evaluator.get("level")
+            or codex_outcome.get("profile_index")
             or codex_outcome.get("level")
         )
         created = (
@@ -710,14 +782,35 @@ class RunRepository:
         if not status:
             status = "completed_capture" if evaluator else "in_progress"
         parent = Path(run.run_id).parent.as_posix()
+        task_manifest = codex_manifest.get("task") or env_manifest.get("task")
+        task_manifest = task_manifest if isinstance(task_manifest, dict) else {}
         return {
             "id": run.run_id,
             "name": run.directory.name,
             "group": "" if parent == "." else parent,
             "kind": run.kind,
-            "task": codex_manifest.get("task") or env_manifest.get("task") or "grasp_classify",
+            "task": _task_name(
+                codex_manifest.get("task") or env_manifest.get("task")
+            ),
+            "start_condition": (
+                codex_manifest.get("start_condition")
+                or env_manifest.get("start_condition")
+                or task_manifest.get("start_condition")
+                or evaluator.get("start_condition")
+            ),
+            "pre_move_enabled": (
+                codex_manifest.get("pre_move_enabled")
+                if "pre_move_enabled" in codex_manifest
+                else env_manifest.get("pre_move_enabled")
+                if "pre_move_enabled" in env_manifest
+                else task_manifest.get("pre_move_enabled")
+            ),
             "level": level,
-            "profile": profile.get("name") or evaluator.get("profile"),
+            "profile": (
+                profile.get("name")
+                or evaluator.get("observation_profile")
+                or evaluator.get("profile")
+            ),
             "profile_description": profile.get("description"),
             "modalities": profile.get("public_modalities") or [],
             "created_utc": created,
@@ -768,6 +861,12 @@ class RunRepository:
             ("agent_observations_h264.mp4", "完整 Observation 回放", "video"),
             ("CODEX_TRACE.md", "中文 Codex Trace", "text"),
             ("codex_operator_prompt.txt", "Codex task prompt", "text"),
+            ("codex_base_instructions.txt", "Codex base instructions", "text"),
+            (
+                "codex_developer_instructions.txt",
+                "Codex developer instructions",
+                "text",
+            ),
             ("codex_run_manifest.json", "运行 manifest", "json"),
             ("codex_run_outcome.json", "Codex 运行结果", "json"),
             ("evaluator_outcome.json", "终局评测", "json"),

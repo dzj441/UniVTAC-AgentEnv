@@ -6,9 +6,12 @@ from pathlib import Path
 from agent_env.codex_events import (
     EventRecorder,
     audit_codex_events,
+    build_benchmark_score,
     build_human_trace,
+    check_token_budget,
     summarize_codex_runtime,
     summarize_tool_calls,
+    token_budget_manifest,
 )
 
 
@@ -187,6 +190,70 @@ def test_runtime_and_tool_summaries_use_terminal_app_server_state(
         "successful_results": 1,
         "failed_results": 1,
     }
+
+
+def test_output_token_budget_uses_cumulative_output_without_double_counting_reasoning(
+    tmp_path: Path,
+) -> None:
+    recorder = EventRecorder(tmp_path)
+    recorder.record_raw(
+        "server_to_host",
+        {
+            "method": "thread/tokenUsage/updated",
+            "params": {
+                "tokenUsage": {
+                    "total": {
+                        "totalTokens": 10800,
+                        "inputTokens": 8000,
+                        "outputTokens": 2800,
+                        "reasoningOutputTokens": 1200,
+                    }
+                }
+            },
+        },
+    )
+    runtime = summarize_codex_runtime(recorder.raw_path)
+
+    exact = check_token_budget(runtime, 2800)
+    assert exact["observed_output_tokens"] == 2800
+    assert exact["observed_reasoning_output_tokens"] == 1200
+    assert exact["within_budget"] is True
+    assert exact["budget_passed"] is True
+
+    exceeded = check_token_budget(runtime, 2799)
+    assert exceeded["within_budget"] is False
+    assert exceeded["budget_passed"] is False
+    assert exceeded["failure_reason"] == "token_budget_exceeded"
+    score = build_benchmark_score(
+        valid_for_scoring=True,
+        official_task_success=True,
+        token_budget_check=exceeded,
+    )
+    assert score["benchmark_success"] is False
+    assert score["failure_reasons"] == ["token_budget_exceeded"]
+
+
+def test_configured_token_budget_fails_closed_when_usage_is_unavailable() -> None:
+    missing = check_token_budget({}, 1000)
+    assert missing["measurement_available"] is False
+    assert missing["within_budget"] is None
+    assert missing["budget_passed"] is False
+    assert missing["failure_reason"] == "token_usage_unavailable"
+
+    unlimited = check_token_budget({}, None)
+    assert unlimited["configured"] is False
+    assert unlimited["budget_passed"] is True
+    assert unlimited["failure_reason"] is None
+
+
+def test_token_budget_rejects_non_positive_or_boolean_limits() -> None:
+    for invalid in (0, -1, True):
+        try:
+            token_budget_manifest(invalid)
+        except ValueError as exc:
+            assert "positive integer" in str(exc)
+        else:
+            raise AssertionError(f"Expected invalid token budget {invalid!r} to fail")
 
 
 def test_human_trace_joins_decision_action_observation_and_outcome(tmp_path: Path) -> None:

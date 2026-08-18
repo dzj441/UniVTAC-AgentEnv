@@ -208,6 +208,8 @@ class CodexAppServerClient:
         model: str | None,
         effort: str,
         reasoning_summary: str = "detailed",
+        task_name: str = "grasp_classify",
+        profile_name: str | None = None,
     ) -> dict[str, Any]:
         if self.thread_id is None:
             raise CodexAppServerError("start_thread must be called first")
@@ -224,8 +226,8 @@ class CodexAppServerClient:
             "summary": reasoning_summary,
             "responsesapiClientMetadata": {
                 "benchmark": "univtac_agentenv",
-                "task": "grasp_classify",
-                "level": str(gateway.profile.level),
+                "task": task_name,
+                "profile": profile_name or str(gateway.profile.level),
             },
         }
         if model:
