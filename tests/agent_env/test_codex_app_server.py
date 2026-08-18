@@ -73,6 +73,7 @@ class TerminalSimulator:
                 "status": "prediction_submitted",
                 "predicted_class": "plain",
                 "committed_target": "green",
+                "observation_id": "obs_000",
             }
         if command["command"] == "finish":
             return {
@@ -106,7 +107,7 @@ assert thread["method"] == "thread/start"
 tools = {item["name"] for item in thread["params"]["dynamicTools"]}
 assert tools == {
     "start_episode", "probe_gripper", "commit_classification",
-    "act_delta_ee", "wait_physics", "finish_episode", "inspect_episode_status",
+    "act_delta_ee", "wait_physics", "finish_episode",
 }
 send({"id": thread["id"], "result": {"thread": {"id": "thread-test"}}})
 turn = receive()

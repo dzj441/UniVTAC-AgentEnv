@@ -27,7 +27,7 @@ fi
 # matches the host kernel driver.  The host's injected bundle is deliberately
 # excluded: this project uses the independently prepared, reproducible bundle
 # on the shared data disk.
-DEFAULT_NVIDIA_RENDER_ROOT="/inspire/qb-ilm/project/semantic-visual-tokenizer/public/dzj/robomme_runtime/nvidia/570.124.06"
+DEFAULT_NVIDIA_RENDER_ROOT="/inspire/qb-ilm/project/semantic-visual-tokenizer/public/dzj/robomme_runtime/nvidia/570.195.03"
 NVIDIA_RENDER_ROOT="${UNIVTAC_NVIDIA_RENDER_ROOT:-${DEFAULT_NVIDIA_RENDER_ROOT}}"
 NVIDIA_RENDER_ROOT="${NVIDIA_RENDER_ROOT%/}"
 NVIDIA_RENDER_VERSION="${UNIVTAC_NVIDIA_RENDER_VERSION:-$(basename -- "${NVIDIA_RENDER_ROOT}")}"

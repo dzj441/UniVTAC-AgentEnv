@@ -37,7 +37,7 @@ class AgentEnvProfile:
 
     @property
     def public_feedback(self) -> tuple[str, ...]:
-        feedback = ["execution_succeeded"]
+        feedback: list[str] = []
         if self.expose_task_success_after_prediction:
             feedback.append("task_success_after_prediction")
         return tuple(feedback)

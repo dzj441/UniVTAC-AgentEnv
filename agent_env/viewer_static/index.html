@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <meta
+      name="description"
+      content="UniVTAC AgentEnv 与 Codex 多轮交互记录回放器"
+    />
+    <title>UniVTAC · Agent Run Viewer</title>
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar">
+        <div class="brand-block">
+          <div class="brand-mark" aria-hidden="true">
+            <span></span><span></span><span></span>
+          </div>
+          <div>
+            <p class="eyebrow">EMBODIED TRACE</p>
+            <h1>UniVTAC</h1>
+          </div>
+        </div>
+
+        <div class="sidebar-copy">
+          <p>环境在左，Agent 在右。按实际发生顺序复盘 observation、判断、动作与反馈。</p>
+        </div>
+
+        <label class="search-box" for="run-search">
+          <span aria-hidden="true">⌕</span>
+          <input id="run-search" type="search" placeholder="筛选 run / Level / 结果" />
+        </label>
+
+        <div class="run-list-header">
+          <span>稳定运行记录</span>
+          <button class="icon-button" id="refresh-runs" type="button" title="刷新记录">
+            ↻
+          </button>
+        </div>
+        <nav class="run-list" id="run-list" aria-label="运行记录"></nav>
+
+        <footer class="sidebar-footer">
+          <span class="live-dot" aria-hidden="true"></span>
+          <span id="server-status">正在连接本地记录服务…</span>
+        </footer>
+      </aside>
+
+      <main class="workspace">
+        <button class="mobile-menu" id="mobile-menu" type="button" aria-label="打开运行列表">
+          ☰
+        </button>
+
+        <section class="empty-state" id="empty-state">
+          <div class="empty-orbit" aria-hidden="true">
+            <span class="orbit-dot dot-env"></span>
+            <span class="orbit-dot dot-agent"></span>
+            <span class="orbit-core">U</span>
+          </div>
+          <p class="eyebrow">RUN REVIEW</p>
+          <h2>选择一条运行记录开始复盘</h2>
+          <p>这里会把 Codex 公开的 reasoning summary、显式 decision record、动作和新 observation 串成一次可检查的对话。</p>
+        </section>
+
+        <section class="run-view is-hidden" id="run-view" aria-live="polite">
+          <header class="run-header">
+            <div class="run-title-block">
+              <div class="crumbs" id="run-crumbs"></div>
+              <div class="title-line">
+                <h2 id="run-title"></h2>
+                <span class="status-pill" id="run-kind"></span>
+              </div>
+              <p id="run-subtitle"></p>
+            </div>
+            <div class="header-actions" id="artifact-actions"></div>
+          </header>
+
+          <section class="result-strip" id="result-strip"></section>
+
+          <section class="overview-grid">
+            <article class="panel overview-panel">
+              <div class="panel-heading">
+                <div>
+                  <p class="eyebrow">RUN SNAPSHOT</p>
+                  <h3>本轮概览</h3>
+                </div>
+              </div>
+              <div class="metric-grid" id="metric-grid"></div>
+              <div class="capability-row" id="capability-row"></div>
+              <p class="recording-note" id="recording-note"></p>
+            </article>
+
+            <article class="panel video-panel" id="video-panel">
+              <div class="panel-heading">
+                <div>
+                  <p class="eyebrow">FULL EPISODE</p>
+                  <h3>Observation 视频</h3>
+                </div>
+                <span class="video-format">H.264 · yuv420p</span>
+              </div>
+              <video id="episode-video" controls preload="metadata" playsinline></video>
+              <p class="video-note">每一帧对应一次公开 observation；它是决策回放，不是逐 physics-step 录像。</p>
+            </article>
+          </section>
+
+          <details class="prompt-panel panel" id="prompt-panel">
+            <summary>
+              <span>
+                <span class="eyebrow">AGENT CONTRACT</span>
+                <strong>本轮 task prompt 与开放能力</strong>
+              </span>
+              <span class="summary-hint">点击展开</span>
+            </summary>
+            <div class="prompt-layout">
+              <pre id="task-prompt"></pre>
+              <div id="profile-detail"></div>
+            </div>
+          </details>
+
+          <section class="timeline-section">
+            <div class="timeline-heading">
+              <div>
+                <p class="eyebrow">ENV ↔ AGENT</p>
+                <h3>多轮交互回放</h3>
+                <p id="timeline-description"></p>
+              </div>
+              <div class="view-toggle" role="group" aria-label="时间线显示模式">
+                <button class="is-active" id="show-all" type="button">完整对话</button>
+                <button id="show-focus" type="button">单步聚焦</button>
+              </div>
+            </div>
+
+            <div class="timeline-toolbar" id="timeline-toolbar">
+              <button class="step-nav" id="previous-step" type="button" aria-label="上一步">←</button>
+              <div class="step-rail" id="step-rail" aria-label="动作步骤"></div>
+              <button class="step-nav" id="next-step" type="button" aria-label="下一步">→</button>
+            </div>
+
+            <div class="conversation-legend" aria-hidden="true">
+              <span><i class="legend-dot env"></i>ENV · observation / feedback</span>
+              <span><i class="legend-dot agent"></i>AGENT · reasoning / action</span>
+            </div>
+
+            <div class="conversation" id="conversation"></div>
+          </section>
+        </section>
+
+        <section class="error-state is-hidden" id="error-state" role="alert">
+          <span class="error-code">TRACE ERROR</span>
+          <h2>这条记录暂时无法读取</h2>
+          <p id="error-message"></p>
+          <button id="retry-button" type="button">重新加载</button>
+        </section>
+      </main>
+    </div>
+
+    <div class="sidebar-scrim" id="sidebar-scrim"></div>
+
+    <dialog class="lightbox" id="lightbox">
+      <button class="lightbox-close" id="lightbox-close" type="button" aria-label="关闭">×</button>
+      <button class="lightbox-arrow previous" id="lightbox-previous" type="button" aria-label="上一张">←</button>
+      <figure>
+        <img id="lightbox-image" alt="传感器 observation 大图" />
+        <figcaption>
+          <span id="lightbox-title"></span>
+          <span id="lightbox-counter"></span>
+        </figcaption>
+      </figure>
+      <button class="lightbox-arrow next" id="lightbox-next" type="button" aria-label="下一张">→</button>
+    </dialog>
+
+    <template id="loading-template">
+      <div class="loading-card">
+        <span></span><span></span><span></span>
+        <p>正在整理 interaction trace…</p>
+      </div>
+    </template>
+
+    <script src="./app.js" defer></script>
+  </body>
+</html>

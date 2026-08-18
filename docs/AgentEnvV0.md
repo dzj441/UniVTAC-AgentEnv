@@ -12,16 +12,24 @@ budget or change task dynamics, initialization, control, or success checking.
 
 | Level | Public observation | Public feedback after an action |
 |---|---|---|
-| 1 `vision_only_control` | head RGB, wrist RGB, 8-D joint state, gripper qpos, 7-D end-effector pose | low-level `execution_succeeded` |
-| 2 `visuotactile_control` | Level 1 plus left/right tactile marker RGB | low-level `execution_succeeded` |
-| 3 `success_guided_visuotactile_control` | Same observation as Level 2 | `execution_succeeded` plus `task_success`, but only after `submit_prediction` |
+| 1 `vision_only_control` | head RGB, wrist RGB, 8-D joint state, gripper qpos, 7-D end-effector pose | none |
+| 2 `visuotactile_control` | Level 1 plus left/right tactile marker RGB | none |
+| 3 `success_guided_visuotactile_control` | Same observation as Level 2 | `task_success`, but only after `submit_prediction` |
 
-Depth, bounding boxes, camera calibration, actor poses, contact forces, reward,
-and privileged simulator state are absent in v0. “Absent” is literal: a field
+Raw simulator depth, bounding boxes, camera calibration, actor poses, contact forces, reward,
+and privileged simulator state are absent in the default v0 surface. “Absent” is literal: a field
 is not serialized as `null`, `withheld`, or a placeholder.
 
-`execution_succeeded` only says that the controller/planner executed a command.
-It is available at every level and must not be confused with the task checker.
+An orthogonal, explicitly selected `perception_profile` may add SAM 3-derived
+masks/boxes or UniDepth V2-predicted depth on the latest public RGB. It never
+adds raw simulator depth or calibration to the model-visible surface; see
+[Semantic Perception Tools](SemanticPerceptionTools.md).
+
+Low-level `execution_succeeded`, timing, tactile-health statistics, protocol
+stage/counters, remaining budgets, and evaluator truth remain available to the
+host audit where needed, but are removed from the model-visible projection.
+The fresh robot state is the agent's evidence of what an action actually did.
+See [Agent visibility audit](AgentVisibilityAudit.md).
 
 ## Irreversible prediction boundary
 
@@ -38,11 +46,11 @@ Translation is locked until the agent calls:
 ```
 
 The task mapping is `rough -> orange` and `plain -> green`. The prediction may
-be submitted exactly once. Afterwards, a cumulative world-Y guard prevents the
-agent from crossing to the other pad. Level 3 success guidance is unlocked only
-after this boundary, so it can refine placement geometry but cannot be used to
-try both labels. This transition is also the intended insertion point for a
-future post-prediction `early_failure` guidance channel.
+be submitted exactly once, so its categorical target cannot change. Physical
+motion is not constrained to a hand-coded target half-space: both signs of all
+Cartesian axes remain executable, and no target direction is returned or
+revealed through a direction-specific rejection. Level 3 task-success feedback
+is available only after this boundary.
 
 Before prediction, an agent may make up to two optional gripper-only `probe`
 calls. They change the physical contact but never expose task success. No probe
@@ -65,11 +73,11 @@ The launcher defaults to the configured parent environment:
 ```
 
 Set `UNIVTAC_PYTHON` to override it. On the current cluster the launcher uses
-the independently prepared NVIDIA 570.124.06 **userspace-only** rendering stack
+the independently prepared NVIDIA 570.195.03 **userspace-only** rendering stack
 at:
 
 ```text
-/inspire/qb-ilm/project/semantic-visual-tokenizer/public/dzj/robomme_runtime/nvidia/570.124.06
+/inspire/qb-ilm/project/semantic-visual-tokenizer/public/dzj/robomme_runtime/nvidia/570.195.03
 ```
 
 The machine also needs three small, generic runtime packages (no NVIDIA or CUDA
@@ -89,7 +97,7 @@ a CUDA Driver API smoke test, and audits actual mapped library paths both before
 Kit startup and inside the live Isaac process. The audit is stored in
 `manifest.json`.
 
-The host must still provide a matching 570.124.06 kernel module and GPU device
+The host must still provide a matching 570.195.03 kernel module and GPU device
 nodes; a userspace bundle cannot replace those. The launcher never installs or
 changes a kernel module, CUDA toolkit, or NVIDIA package. To use another machine,
 point `UNIVTAC_NVIDIA_RENDER_ROOT` at an exact-match bundle; if its directory
@@ -102,7 +110,7 @@ responses start with `AGENT_ENV_RESULT `. The command sequence is:
 start
   -> zero to two probe calls
   -> submit_prediction (irreversible)
-  -> act and/or wait (at most ten)
+  -> act and/or wait (at most twenty)
   -> finish
   -> close
 ```
@@ -142,7 +150,11 @@ Each run under `agent_runs/` contains:
 - `manifest.json`: selected Level, exact capability set, bounds, budget, and seed commitment;
 - `agent_transcript.jsonl`: complete public command/observation/response history;
 - `observations/`: only images public at the selected Level;
-- `agent_observations_h264.mp4`: H.264/yuv420p video made only from public panels;
+- `agent_observations_h264.mp4`: evaluator-owned H.264/yuv420p video made only
+  from public sensor panels;
+- `agent_timeline_h264.mp4`: Codex-run H.264 replay whose left side is the same
+  public observation composite and whose right side lists every agent tool call
+  based on that observation;
 - `evaluator_outcome.json`: terminal classification, committed-pad, and official-success metrics;
 - `evaluator_private_audit.json`: private checker events, created only when the episode terminates.
 
@@ -186,6 +198,10 @@ Run one episode as follows:
   --run-dir agent_runs/example_level1
 ```
 
+To opt into model-derived perception without changing the selected Level, start
+the isolated services and add, for example,
+`--perception-profile sam3_unidepth_v2`. The default is `none`.
+
 Use `--model MODEL` to pin a Codex model and `--effort high` (or another
 supported effort) to pin reasoning effort. `--dry-run` prints the exact public
 capability manifest without launching Codex or Isaac. Run Levels serially on
@@ -217,14 +233,22 @@ In addition to the simulator artifacts listed above, the operator writes:
 - `codex_app_server_stderr.log` and `simulator_stdout.log`: process diagnostics.
 
 Every JSONL stream is append-only during the run and contains a per-event hash
-chain. The existing `agent_observations_h264.mp4` remains the browser-compatible
-H.264/yuv420p visual replay. These artifacts record every event Codex publishes
+chain. `agent_observations_h264.mp4` remains the immutable sensor-only replay
+used by the browser Viewer. `agent_timeline_h264.mp4` is a separate post-run
+sharing artifact and does not replace or alter the Viewer video. These artifacts
+record every event Codex publishes
 and every explicit decision required by the tool schema. They cannot expose
 model-internal hidden chain-of-thought that the Codex protocol does not publish.
 Host-rejected attempts retain a decision record with `chosen_action=null`, so
 the rationale remains reviewable while the audit proves no simulator command
-was sent. The video has one frame per public observation; it is not yet a
-continuous physics-step recording.
+was sent. Both videos have one frame per public observation; they are not
+continuous physics-step recordings. In the timeline video, frame `obs_N` shows
+all calls whose host-recorded `prior_observation_id` is `obs_N`. A commit and a
+following action may therefore appear together when the commit does not create
+a new observation. Rejected calls appear on the actual current frame even when
+the agent supplied a malformed observation id.
+The timeline runs at 1 FPS for readable text; the sensor-only replay keeps the
+existing 2 FPS behavior.
 
 Tactile marker health is a reset-time rendering requirement and a per-frame
 diagnostic thereafter. A heavily loaded contact may legitimately merge marker

@@ -12,6 +12,19 @@ For the experimental three-level, agent-facing `grasp_classify` interface, see
 Level-scoped dynamic tools, and complete decision/event trace are documented in
 [Codex embodied-agent runner](docs/CodexAgentRunner.md).
 
+Optional, fairness-gated SAM 3 segmentation and UniDepth V2 predicted-depth
+tools are documented in [Semantic Perception Tools](docs/SemanticPerceptionTools.md).
+
+Replay completed or in-progress AgentEnv/Codex records in the browser with the
+[Agent Run Viewer](docs/AgentRunViewer.md):
+
+```bash
+../miniconda3/envs/UniVTAC/bin/python scripts/run_agent_viewer.py --port 8765
+```
+
+The viewer binds to `0.0.0.0`, reads `agent_runs` without modifying it, and
+prints a code-server URL by resolving `{{port}}` in `VSCODE_PROXY_URI`.
+
 Clone the repository and run the installation script `scripts/install.sh` to set up the environment and install dependencies all at once. The script will create a conda environment named `UniVTAC` and install Isaac Sim, Isaac Lab, TacEx, cuRobo, and other necessary packages.
 
 ```bash

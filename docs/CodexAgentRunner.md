@@ -20,8 +20,9 @@ CapabilityGateway
   │  validated AgentEnv JSON command
   ▼
 Isaac/TacEx AgentEnv process
-  │  whitelisted observation + bounded feedback
+  │  rich host response (audit only)
   └──────────────────────────────────────────────► CapabilityGateway ► Codex
+                                      minimal sensor/state projection
 ```
 
 Codex never receives the simulator subprocess, stdin/stdout file descriptors,
@@ -80,8 +81,10 @@ irreversible target commitment.
 - `act_delta_ee`: bounded world-frame translation, rotation, and gripper delta;
 - `wait_physics`: advance 1–60 physics steps without a control delta;
 - `finish_episode`: request terminal evaluation at the current state;
-- `inspect_episode_status`: public protocol state only; it does not refresh an
-  observation or expose checker state.
+
+`inspect_episode_status` is deliberately not registered for the agent. Host
+status remains available for orchestration and audit without entering the
+Codex context.
 
 There is intentionally no `solve_ik`, `move_joints`, `get_object_pose`,
 `get_depth`, `read_file`, `python`, or `shell` tool. Unknown fields are rejected
@@ -101,8 +104,15 @@ Every probe, commitment, physical action, wait, and finish call contains:
 The host stores the record before returning the resulting observation. Failed
 and rejected calls remain visible in the raw, tool-call, and decision streams;
 a rejected call has `chosen_action=null`, proving it did not reach the
-simulator. This is an explicit, reviewable rationale—not hidden model
-chain-of-thought.
+simulator. Exact rejection causes stay host-side; Codex receives only a generic
+contract rejection so it cannot probe hidden state through error text. This is
+an explicit, reviewable rationale—not hidden model chain-of-thought.
+
+The task turn prompt contains only the task name and its semantic goal. It does
+not identify the Level, available modalities, strategy, action budget, target
+direction, success availability, or recommended sequence. Units and bounds
+remain in the dynamic-tool schemas because they define valid actions rather
+than solve the task.
 
 ## Process isolation
 
@@ -138,9 +148,30 @@ and the canonical PNG already exists under `observations/`.
 `codex_run_outcome.json` also records the app-server-resolved model, reasoning
 settings, cumulative/last-turn token usage, accepted/rejected tool-call counts,
 and end-to-end wall time. `CODEX_TRACE.md` is a Chinese, image-linked review of
-the complete published interaction. The existing H.264 replay contains one
-composite frame per public observation; it is an observation/action replay, not
-a continuous every-physics-step recording.
+the complete published interaction. The evaluator-owned
+`agent_observations_h264.mp4` contains one sensor composite per public
+observation. After the Codex turn is complete, the host additionally builds
+`agent_timeline_h264.mp4`: the same composite on the left, with every tool call
+based on that observation on the right. It includes exact compact arguments,
+execution target, accepted/rejected status, returned observation id, and a
+bounded preview of the public decision rationale. Neither file is a continuous
+every-physics-step recording.
+The timeline uses 1 FPS so the compact call panel is readable during normal
+playback; the sensor-only replay retains the existing 2 FPS encoding.
+
+The mapping uses the gateway-recorded `prior_observation_id`, not the id typed
+by the model. Consequently a malformed/stale-id attempt remains visible beside
+the observation the agent actually had, and is marked `HOST REJECTED`. Calls
+that do not create a new observation, such as classification commit followed
+by control, share the same frame.
+The timeline is a supplemental post-visualization artifact; the browser Viewer
+continues to use `agent_observations_h264.mp4`. It can also be regenerated from
+any completed Codex run without launching the simulator:
+
+```bash
+../miniconda3/envs/UniVTAC/bin/python scripts/render_agent_toolcall_video.py \
+  agent_runs/<run-directory>
+```
 
 An episode is `valid_for_scoring=true` only when:
 

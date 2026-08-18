@@ -26,6 +26,9 @@ from agent_env.capabilities import (  # noqa: E402
     CapabilityViolation,
     capability_manifest,
 )
+from agent_env.artifacts import (  # noqa: E402
+    encode_observation_toolcall_video,
+)
 from agent_env.codex_app_server import CodexAppServerClient  # noqa: E402
 from agent_env.codex_events import (  # noqa: E402
     EventRecorder,
@@ -40,6 +43,11 @@ from agent_env.codex_isolation import (  # noqa: E402
     embodied_codex_command,
 )
 from agent_env.profiles import get_profile  # noqa: E402
+from agent_env.perception_profiles import (  # noqa: E402
+    get_perception_profile,
+    list_perception_profiles,
+)
+from agent_env.perception_runtime import PerceptionRuntime  # noqa: E402
 from agent_env.stdio_bridge import SimulatorProcessClient  # noqa: E402
 
 
@@ -59,38 +67,21 @@ benchmark artifact.
 """
 
 
-def operator_prompt(level: int) -> str:
-    profile = get_profile(level)
-    tactile = (
-        "Head RGB, wrist RGB, tactile marker RGB, and basic robot state are available."
-        if profile.expose_tactile
-        else "Only head RGB, wrist RGB, and basic robot state are available."
-    )
-    guidance = (
-        "After the irreversible classification commitment, each control result also "
-        "contains task_success. It may refine motion but cannot change the target."
-        if profile.expose_task_success_after_prediction
-        else "Task-success feedback is never available during control at this Level."
-    )
-    return f"""\
-Independently execute exactly one grasp_classify rollout at Level {level}.
+def operator_prompt(level: int, perception_profile_name: str = "none") -> str:
+    """Return task semantics and generic placement guidance."""
 
-Task semantics: determine whether the already grasped prism is rough or plain,
-then place rough on orange or plain on green. {tactile} {guidance}
+    # Keep a stable call signature for manifests and external launchers while
+    # deliberately withholding Level, modality, coordinate, budget, and feedback
+    # descriptions from the task prompt. The placement hint is identical across
+    # Levels and does not expose simulator state or checker geometry.
+    del level, perception_profile_name
+    return """\
+Task: grasp_classify
 
-Begin with start_episode. You may use at most two pre-classification gripper
-probes. Commit exactly once before any Cartesian motion. Then operate only
-through bounded delta end-effector or wait tools. Continue until a tool returns
-a terminal rollout result; if it has not auto-terminated, call finish_episode
-when you judge the best attainable terminal state has been reached. Do not end
-the turn while the episode is active. Never use knowledge from prior runs.
-
-For every decision_record, explicitly state what you observed, at least one
-alternative, uncertainty, expected effect, and why the exact numeric magnitude
-was chosen instead of nearby smaller or larger values. Numeric translation and
-gripper units are metres: a probe is at most 0.002 m (2 mm), a post-commit
-gripper delta is at most 0.005 m (5 mm), and a Cartesian component is at most
-0.04 m (4 cm). Values such as 0.01 or 0.02 are invalid gripper deltas.
+Determine whether the grasped prism is rough or plain. Place a rough prism on
+the orange pad and a plain prism on the green pad.
+For a stable placement, align the prism upright over the center of the target
+pad before releasing it; avoid releasing near the pad edge.
 """
 
 
@@ -106,6 +97,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--codex-bin", default="codex")
     parser.add_argument("--auth-home", type=Path, default=None)
     parser.add_argument("--timeout-seconds", type=float, default=3600.0)
+    parser.add_argument(
+        "--perception-profile",
+        default="none",
+        choices=tuple(profile.name for profile in list_perception_profiles()),
+        help="Orthogonal read-only perception surface; default keeps the original benchmark.",
+    )
+    parser.add_argument(
+        "--sam3-url",
+        default=os.environ.get("UNIVTAC_SAM3_URL", "http://127.0.0.1:8783"),
+    )
+    parser.add_argument(
+        "--unidepth-v2-url",
+        default=os.environ.get("UNIVTAC_UNIDEPTH_V2_URL", "http://127.0.0.1:8784"),
+    )
+    parser.add_argument("--perception-timeout-seconds", type=float, default=300.0)
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -130,6 +136,16 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
 
 def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def build_agent_timeline_video(run_dir: Path, tool_call_path: Path) -> dict[str, Any]:
+    """Create a supplemental post-run replay without mutating Viewer media."""
+
+    return encode_observation_toolcall_video(
+        run_dir / "observations",
+        tool_call_path,
+        run_dir / "agent_timeline_h264.mp4",
+    )
 
 
 def command_version(command: str) -> str:
@@ -163,7 +179,8 @@ def main() -> int:
     run_started_monotonic = time.monotonic()
     args = parse_args()
     level = int(args.level)
-    capabilities = capability_manifest(level)
+    perception_profile = get_perception_profile(args.perception_profile)
+    capabilities = capability_manifest(level, perception_profile)
     if args.dry_run:
         print(json.dumps(capabilities, ensure_ascii=False, indent=2))
         return 0
@@ -181,6 +198,8 @@ def main() -> int:
     simulator: SimulatorProcessClient | None = None
     codex: CodexAppServerClient | None = None
     recorder: EventRecorder | None = None
+    perception_runtime: PerceptionRuntime | None = None
+    perception_health: dict[str, Any] | None = None
     host_close_response: dict[str, Any] | None = None
     result: dict[str, Any] = {
         "schema_version": "univtac.codex_rollout_outcome.v1",
@@ -214,12 +233,23 @@ def main() -> int:
             raise RuntimeError("Simulator capability profile disagrees with host registry")
 
         recorder = EventRecorder(run_dir)
+        if perception_profile.name != "none":
+            perception_runtime = PerceptionRuntime(
+                profile=perception_profile,
+                run_dir=run_dir,
+                sam3_url=args.sam3_url,
+                unidepth_v2_url=args.unidepth_v2_url,
+                timeout_seconds=args.perception_timeout_seconds,
+            )
+            perception_health = perception_runtime.health_manifest()
         gateway = CapabilityGateway(
             level=level,
             simulator_request=simulator.request,
             simulator_run_dir=run_dir,
+            perception_profile=perception_profile,
+            perception_runtime=perception_runtime,
         )
-        prompt = operator_prompt(level)
+        prompt = operator_prompt(level, perception_profile.name)
         (run_dir / "codex_operator_prompt.txt").write_text(prompt, encoding="utf-8")
         write_json(run_dir / "codex_capabilities.json", capabilities)
 
@@ -232,6 +262,8 @@ def main() -> int:
                 "task": "grasp_classify",
                 "level": level,
                 "profile": get_profile(level).to_manifest(),
+                "perception_profile": perception_profile.to_manifest(),
+                "perception_service_health_at_start": perception_health,
                 "requested_model": args.model,
                 "model": args.model or "Codex configured default",
                 "effort": args.effort,
@@ -249,9 +281,21 @@ def main() -> int:
                     "dynamic_tool_allowlist": True,
                     "host_side_tool_validation": True,
                     "simulator_side_command_validation": True,
+                    "host_resolved_latest_rgb_for_perception": True,
+                    "semantic_evidence_requires_prior_successful_tool_result": True,
+                    "semantic_call_budget_per_observation": {
+                        "sam3_segment": perception_profile.max_sam3_calls_per_observation,
+                        "estimate_metric_depth": (
+                            perception_profile.max_unidepth_v2_calls_per_observation
+                        ),
+                    },
+                    "host_only_calibrated_intrinsics": True,
                     "codex_read_only_sandbox": True,
                     "codex_network_access": False,
                     "forbidden_item_fail_closed": True,
+                    "max_consecutive_rejected_tool_calls": (
+                        gateway.MAX_CONSECUTIVE_REJECTED_CALLS
+                    ),
                     "model_visible_close_command": False,
                 },
                 "threat_model": {
@@ -271,7 +315,12 @@ def main() -> int:
                     "published_messages_and_reasoning_summaries": "codex_messages.jsonl",
                     "capability_violations": "capability_violations.jsonl",
                     "simulator_transcript": "agent_transcript.jsonl",
-                    "video": "agent_observations_h264.mp4 after terminal evaluation",
+                    "video": (
+                        "agent_observations_h264.mp4 remains the evaluator-owned Viewer "
+                        "replay; agent_timeline_h264.mp4 is a supplemental post-run "
+                        "observation + tool-call sharing artifact"
+                    ),
+                    "semantic_perception": "semantic_perception/<observation>/<tool>/<call>",
                     "hidden_chain_of_thought": "not exposed by the Codex protocol",
                 },
             }
@@ -309,6 +358,7 @@ def main() -> int:
                     "turn_id": turn_result["turn_id"],
                     "turn": turn_result["turn"],
                     "episode_terminal": gateway.terminal,
+                    "perception_profile": perception_profile.name,
                     "capability_violation": codex.capability_violation,
                 }
             )
@@ -402,6 +452,37 @@ def main() -> int:
                         if result["valid_for_scoring"]
                         else "completed_not_scorable"
                     )
+                try:
+                    timeline_video = build_agent_timeline_video(
+                        run_dir,
+                        recorder.tool_path,
+                    )
+                except Exception as exc:
+                    timeline_video = {
+                        "error_type": type(exc).__name__,
+                        "message": str(exc),
+                    }
+                result["timeline_video"] = timeline_video
+                if "error_type" not in timeline_video:
+                    recording_artifacts = result.setdefault("recording_artifacts", {})
+                    recording_artifacts["timeline_video"] = {
+                        key: timeline_video[key]
+                        for key in (
+                            "path",
+                            "sha256",
+                            "codec_name",
+                            "profile",
+                            "pix_fmt",
+                            "width",
+                            "height",
+                            "nb_frames",
+                            "frames_per_second",
+                            "layout",
+                            "observation_frame_count",
+                            "mapped_tool_call_count",
+                        )
+                        if key in timeline_video
+                    }
             else:
                 runtime_summary = None
             trace_path = build_human_trace(

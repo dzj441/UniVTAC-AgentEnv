@@ -82,7 +82,7 @@ class CodexAppServerClient:
             stderr=self._stderr_handle,
             text=True,
             bufsize=1,
-        )
+        ) # launch codex here
         assert self.process.stdout is not None
         self._reader = threading.Thread(target=self._read_stdout, daemon=True)
         self._reader.start()
@@ -377,7 +377,12 @@ class CodexAppServerClient:
             "tool": execution.tool,
             "success": execution.success,
             "arguments": arguments,
+            "execution_target": execution.execution_target,
+            "backend_request": execution.backend_request,
             "simulator_command": execution.simulator_command,
+            "environment_response": execution.public_response,
+            "host_response": execution.raw_response,
+            # Backward-compatible alias consumed by existing traces/viewers.
             "simulator_response": execution.public_response,
             "prior_observation_id": execution.prior_observation_id,
             "next_observation_id": execution.next_observation_id,
@@ -393,7 +398,8 @@ class CodexAppServerClient:
                     "tool": execution.tool,
                     "observation_id": execution.prior_observation_id,
                     "decision_record": execution.decision_record,
-                    "chosen_action": execution.simulator_command,
+                    "execution_target": execution.execution_target,
+                    "chosen_action": execution.backend_request,
                     "returned_observation_id": execution.next_observation_id,
                     "tool_success": execution.success,
                 }

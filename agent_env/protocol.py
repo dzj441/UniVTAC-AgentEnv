@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -14,12 +13,6 @@ class ProtocolError(RuntimeError):
     """Raised when an agent command violates the public episode contract."""
 
 
-@dataclass(frozen=True)
-class PreparedDelta:
-    cumulative_y_m: float
-    target_halfspace_locked: bool
-
-
 class EpisodeProtocol:
     """Track public episode state without access to simulator-private truth.
 
@@ -29,17 +22,14 @@ class EpisodeProtocol:
     """
 
     CLASS_TO_TARGET = {"rough": "orange", "plain": "green"}
-    TARGET_Y_SIGN = {"green": 1.0, "orange": -1.0}
-
     MAX_TRANSLATION_COMPONENT_M = 0.04
     MAX_TRANSLATION_NORM_M = 0.06
     MAX_ROTATION_COMPONENT_RAD = 0.35
     MAX_PROBE_GRIPPER_DELTA = 0.002
     MAX_ACTION_GRIPPER_DELTA = 0.005
     MAX_PROBES = 2
-    MAX_POST_PREDICTION_ACTIONS = 10
+    MAX_POST_PREDICTION_ACTIONS = 20
     MAX_WAIT_PHYSICS_STEPS = 60
-    MIN_LOCKED_TARGETWARD_Y_M = 0.02
 
     def __init__(self, profile: AgentEnvProfile):
         self.profile = profile
@@ -51,8 +41,6 @@ class EpisodeProtocol:
         self.committed_target: str | None = None
         self.probe_count = 0
         self.action_count = 0
-        self.cumulative_y_m = 0.0
-        self.target_halfspace_locked = False
 
     @property
     def stage(self) -> str:
@@ -63,10 +51,6 @@ class EpisodeProtocol:
         if self.predicted_class is None:
             return "classification"
         return "post_prediction_control"
-
-    @property
-    def guidance_unlocked(self) -> bool:
-        return self.predicted_class is not None and self.active
 
     def start(self, observation_id: str) -> None:
         if self.started:
@@ -132,7 +116,6 @@ class EpisodeProtocol:
             "predicted_class": normalized_class,
             "committed_target": normalized_target,
             "irreversible": True,
-            "guidance_unlocked": self.guidance_unlocked,
         }
 
     def prepare_delta(
@@ -142,7 +125,7 @@ class EpisodeProtocol:
         delta_position: object,
         delta_rpy: object,
         delta_gripper: object,
-    ) -> tuple[np.ndarray, np.ndarray, float, PreparedDelta]:
+    ) -> tuple[np.ndarray, np.ndarray, float]:
         self._validate_post_prediction_action(observation_id)
         dp = self._finite_vector(delta_position, "delta_position", 3)
         dr = self._finite_vector(delta_rpy, "delta_rpy", 3)
@@ -162,30 +145,11 @@ class EpisodeProtocol:
         if abs(dg) > self.MAX_ACTION_GRIPPER_DELTA:
             raise ProtocolError("Gripper delta exceeds the per-action bound")
 
-        sign = self.TARGET_Y_SIGN[self.committed_target]
-        proposed_y = self.cumulative_y_m + float(dp[1])
-        targetward_y = sign * proposed_y
-        if targetward_y < -1e-9:
-            raise ProtocolError("Committed target cannot change: action enters the opposite pad half-space")
-        if (
-            self.target_halfspace_locked
-            and targetward_y < self.MIN_LOCKED_TARGETWARD_Y_M - 1e-9
-        ):
-            raise ProtocolError("Committed target cannot change: action leaves the locked target region")
-        prepared = PreparedDelta(
-            cumulative_y_m=proposed_y,
-            target_halfspace_locked=(
-                self.target_halfspace_locked
-                or targetward_y >= self.MIN_LOCKED_TARGETWARD_Y_M
-            ),
-        )
-        return dp, dr, dg, prepared
+        return dp, dr, dg
 
-    def complete_delta(self, prepared: PreparedDelta, next_observation_id: str) -> None:
+    def complete_delta(self, next_observation_id: str) -> None:
         self._require_new_observation(next_observation_id)
         self.action_count += 1
-        self.cumulative_y_m = prepared.cumulative_y_m
-        self.target_halfspace_locked = prepared.target_halfspace_locked
         self.current_observation_id = next_observation_id
 
     def prepare_wait(self, observation_id: object, physics_steps: object) -> int:
@@ -208,7 +172,7 @@ class EpisodeProtocol:
     ) -> dict[str, bool]:
         """Filter private checker output through the selected capability profile."""
 
-        if not self.guidance_unlocked:
+        if self.predicted_class is None or not self.active:
             raise ProtocolError("Feedback remains locked until submit_prediction")
         feedback = {"execution_succeeded": bool(execution_succeeded)}
         if self.profile.expose_task_success_after_prediction:
@@ -217,7 +181,8 @@ class EpisodeProtocol:
 
     def should_auto_stop(self, internal_task_success: bool) -> bool:
         return bool(
-            self.guidance_unlocked
+            self.predicted_class is not None
+            and self.active
             and self.profile.expose_task_success_after_prediction
             and internal_task_success
         )
@@ -241,7 +206,6 @@ class EpisodeProtocol:
             "active": self.active,
             "terminal": self.terminal,
             "stage": self.stage,
-            "guidance_unlocked": self.guidance_unlocked,
             "probe_count": self.probe_count,
             "post_prediction_action_count": self.action_count,
             "predicted_class": self.predicted_class,
@@ -259,7 +223,7 @@ class EpisodeProtocol:
                 "required_before_translation": True,
                 "irreversible": True,
                 "target_switching_afterwards": False,
-                "unlocks_guidance_channels": True,
+                "enables_level_defined_feedback": True,
                 "future_extension_point": "post-prediction early_failure guidance",
             },
             "action_budget": {

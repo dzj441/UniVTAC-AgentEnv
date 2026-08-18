@@ -328,13 +328,21 @@ def summarize_tool_calls(tool_path: Path) -> dict[str, int]:
     """Count relayed, host-rejected, successful, and failed tool attempts."""
 
     rows = _read_jsonl(tool_path)
-    relayed = sum(item.get("simulator_command") is not None for item in rows)
-    host_rejected = sum(item.get("simulator_command") is None for item in rows)
+    def target(item: dict[str, Any]) -> str:
+        explicit = item.get("execution_target")
+        if isinstance(explicit, str):
+            return explicit
+        return "simulator" if item.get("simulator_command") is not None else "rejected"
+
+    relayed = sum(target(item) == "simulator" for item in rows)
+    perception = sum(target(item) == "perception" for item in rows)
+    host_rejected = sum(target(item) == "rejected" for item in rows)
     successful = sum(item.get("success") is True for item in rows)
     failed = sum(item.get("success") is not True for item in rows)
     return {
         "total": len(rows),
         "relayed_to_simulator": relayed,
+        "relayed_to_perception": perception,
         "host_rejected": host_rejected,
         "successful_results": successful,
         "failed_results": failed,
@@ -462,15 +470,26 @@ def build_human_trace(
             lines.extend(["", "考虑过的替代方案：", ""])
             for alternative in decision.get("alternatives_considered", []):
                 lines.append(f"- {alternative}")
-        if call.get("simulator_command") is None:
-            lines.extend(["", "仿真命令：`未发送（宿主验证拒绝）`", ""])
+        execution_target = call.get("execution_target")
+        if not isinstance(execution_target, str):
+            execution_target = (
+                "simulator" if call.get("simulator_command") is not None else "rejected"
+            )
+        if execution_target == "rejected":
+            lines.extend(["", "后端调用：`未发送（宿主验证拒绝）`", ""])
+        elif execution_target == "perception":
+            lines.extend(["", "实际发送给宿主感知服务的请求（图像载荷已省略）：", "", "```json"])
+            lines.append(
+                json.dumps(call.get("backend_request"), ensure_ascii=False, indent=2)
+            )
+            lines.extend(["```", ""])
         else:
             lines.extend(["", "实际发送给仿真的命令：", "", "```json"])
             lines.append(
                 json.dumps(call.get("simulator_command"), ensure_ascii=False, indent=2)
             )
             lines.extend(["```", ""])
-        response = call.get("simulator_response")
+        response = call.get("environment_response", call.get("simulator_response"))
         lines.extend(["返回摘要：", "", "```json"])
         lines.append(json.dumps(_compact_response(response), ensure_ascii=False, indent=2))
         lines.extend(["```", ""])
@@ -583,8 +602,13 @@ def _observation_artifacts(value: Any) -> list[tuple[str, str]]:
         for name, artifact in modalities.items():
             if isinstance(artifact, dict) and isinstance(artifact.get("artifact_id"), str):
                 found.append((str(name), artifact["artifact_id"]))
-    for child in value.values():
-        found.extend(_observation_artifacts(child))
+    artifact_id = value.get("artifact_id")
+    if isinstance(artifact_id, str):
+        label = str(value.get("kind") or value.get("label") or Path(artifact_id).stem)
+        found.append((label, artifact_id))
+    for key, child in value.items():
+        if key != "modalities":
+            found.extend(_observation_artifacts(child))
     deduplicated: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for item in found:

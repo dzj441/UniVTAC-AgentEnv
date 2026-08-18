@@ -15,11 +15,8 @@ def test_three_levels_change_only_tactile_and_success_guidance() -> None:
     assert level3.public_modalities == level2.public_modalities
 
     assert level1.public_robot_state == level2.public_robot_state == level3.public_robot_state
-    assert level1.public_feedback == level2.public_feedback == ("execution_succeeded",)
-    assert level3.public_feedback == (
-        "execution_succeeded",
-        "task_success_after_prediction",
-    )
+    assert level1.public_feedback == level2.public_feedback == ()
+    assert level3.public_feedback == ("task_success_after_prediction",)
 
 
 def test_profiles_have_stable_aliases() -> None:

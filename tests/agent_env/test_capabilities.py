@@ -11,6 +11,7 @@ import pytest
 from agent_env.capabilities import (
     CapabilityGateway,
     CapabilityViolation,
+    ToolCallLoopError,
     build_tool_registry,
     capability_manifest,
 )
@@ -56,7 +57,7 @@ class FakeSimulator:
     def observation(self) -> dict[str, Any]:
         observation_id = f"obs_{self.observation_index:03d}"
         self.observation_index += 1
-        return {
+        observation = {
             "observation_id": observation_id,
             "level": self.profile.level,
             "profile": self.profile.name,
@@ -73,25 +74,57 @@ class FakeSimulator:
                 "end_effector_pose_robot_base_7d": [0.0] * 7,
             },
         }
+        if self.profile.expose_tactile:
+            observation["tactile_health"] = {
+                side: {
+                    "healthy": True,
+                    "expected_markers": 63,
+                    "plausible_marker_components": 61,
+                    "all_dark_components": 64,
+                    "dark_pixel_count": 6200,
+                }
+                for side in ("left", "right")
+            }
+        return observation
 
     def __call__(self, command: dict[str, Any]) -> dict[str, Any]:
         self.calls.append(command)
         name = command["command"]
         if name == "start":
-            return {"status": "rollout_started", "observation": self.observation()}
+            return {
+                "status": "rollout_started",
+                "level": self.profile.level,
+                "profile": self.profile.name,
+                "seed_commitment_sha256": "a" * 64,
+                "stage": "classification",
+                "required_before_translation": "submit_prediction",
+                "optional_before_prediction": "up to 2 probes",
+                "task_success_feedback": "withheld",
+                "observation": self.observation(),
+            }
         if name == "submit_prediction":
             return {
                 "status": "prediction_submitted",
                 "predicted_class": command["predicted_class"],
                 "committed_target": command["target_pad"],
+                "irreversible": True,
+                "observation_id": "obs_000",
+                "rationale": command["rationale"],
+                "success_seen_before_prediction": False,
+                "stage": "post_prediction_control",
+                "task_success_feedback": "withheld",
+                "remaining_post_prediction_actions": 10,
             }
         if name in {"act", "wait", "probe"}:
             response: dict[str, Any] = {
-                "status": "action_complete",
+                "status": "probe_complete" if name == "probe" else "action_complete",
                 "feedback": {"execution_succeeded": True},
                 "observation": self.observation(),
             }
-            if self.profile.expose_task_success_after_prediction or self.leak_task_success:
+            if name != "probe" and (
+                self.profile.expose_task_success_after_prediction
+                or self.leak_task_success
+            ):
                 response["feedback"]["task_success"] = False
             return response
         if name == "finish":
@@ -132,7 +165,6 @@ def test_level_registry_exposes_only_bounded_embodied_primitives() -> None:
         "act_delta_ee",
         "wait_physics",
         "finish_episode",
-        "inspect_episode_status",
     }
     for level in (1, 2, 3):
         registry = build_tool_registry(level)
@@ -144,8 +176,58 @@ def test_level_registry_exposes_only_bounded_embodied_primitives() -> None:
         )
         assert registry["act_delta_ee"].simulator_command == "act"
         assert registry["act_delta_ee"].effect == "world_mutating"
-        assert "5 mm" in registry["act_delta_ee"].description
-        assert "2 mm" in registry["probe_gripper"].description
+        act_schema = registry["act_delta_ee"].input_schema["properties"]
+        probe_schema = registry["probe_gripper"].input_schema["properties"]
+        assert act_schema["delta_gripper"]["maximum"] == 0.005
+        assert probe_schema["delta_gripper"]["maximum"] == 0.002
+        assert "only after commit_classification" in registry["act_delta_ee"].description
+        assert "only after commit_classification" in registry["wait_physics"].description
+        assert "at most two probes" in registry["probe_gripper"].description
+
+
+def test_consecutive_rejected_calls_are_bounded_without_public_counter(
+    tmp_path: Path,
+) -> None:
+    gateway, _ = started_gateway(tmp_path)
+    assert gateway.MAX_CONSECUTIVE_REJECTED_CALLS == 6
+    arguments = {
+        "observation_id": "obs_000",
+        "steps": 1,
+        "decision_record": decision(),
+    }
+    for _ in range(gateway.MAX_CONSECUTIVE_REJECTED_CALLS):
+        rejected = gateway.execute("wait_physics", arguments)
+        assert rejected.success is False
+        assert "remaining" not in json.dumps(rejected.public_response)
+    with pytest.raises(ToolCallLoopError, match="limit exceeded"):
+        gateway.execute("wait_physics", arguments)
+
+
+def test_schema_rejection_is_actionable_without_exposing_private_state(
+    tmp_path: Path,
+) -> None:
+    gateway, _ = started_gateway(tmp_path)
+    invalid = decision()
+    invalid["evidence"] = []
+    rejected = gateway.execute(
+        "probe_gripper",
+        {
+            "observation_id": "not-the-latest-id",
+            "delta_gripper": -0.001,
+            "decision_record": invalid,
+        },
+    )
+    assert rejected.success is False
+    assert rejected.public_response == {
+        "status": "tool_rejected",
+        "tool": "probe_gripper",
+        "message": "decision_record.evidence must contain at least one item.",
+        "observation_id": "obs_000",
+    }
+    rendered = json.dumps(rejected.public_response)
+    assert "stage" not in rendered
+    assert "remaining" not in rendered
+    assert "success" not in rendered
 
 
 def test_decision_schema_sources_are_level_scoped() -> None:
@@ -180,10 +262,6 @@ def test_capability_manifest_is_stable_and_distinguishes_levels() -> None:
 
 def test_gateway_returns_only_level_images_and_never_host_paths(tmp_path: Path) -> None:
     gateway, _ = started_gateway(tmp_path, level=1)
-    execution = gateway.execute("inspect_episode_status", {})
-
-    assert execution.success is True
-    assert "run_dir" not in execution.public_response
     first = gateway.execute(
         "commit_classification",
         {
@@ -194,6 +272,10 @@ def test_gateway_returns_only_level_images_and_never_host_paths(tmp_path: Path) 
         },
     )
     assert first.success is True
+    assert first.public_response == {
+        "status": "prediction_submitted",
+        "observation_id": "obs_000",
+    }
 
     # The original start call delivered one text payload plus two labeled image pairs.
     fresh_gateway = CapabilityGateway(
@@ -207,6 +289,24 @@ def test_gateway_returns_only_level_images_and_never_host_paths(tmp_path: Path) 
     rendered = json.dumps(start.public_response)
     assert str((tmp_path / "fresh").resolve()) not in rendered
     assert "artifact_id" in rendered
+    assert set(start.public_response) == {"status", "observation"}
+    assert set(start.public_response["observation"]) == {
+        "observation_id",
+        "modalities",
+        "robot_state",
+    }
+    for forbidden in (
+        "level",
+        "profile",
+        "stage",
+        "probe_count",
+        "post_prediction_action_count",
+        "seed_commitment_sha256",
+        "required_before_translation",
+        "optional_before_prediction",
+        "task_success_feedback",
+    ):
+        assert forbidden not in rendered
 
 
 def test_unregistered_ik_and_unknown_ik_fields_never_reach_simulator(tmp_path: Path) -> None:
@@ -227,7 +327,13 @@ def test_unregistered_ik_and_unknown_ik_fields_never_reach_simulator(tmp_path: P
         },
     )
     assert rejected.success is False
-    assert "Unknown tool field" in rejected.public_response["message"]
+    assert rejected.public_response["message"] == (
+        "Tool arguments do not satisfy the published input schema."
+    )
+    assert rejected.raw_response is not None
+    assert "Unknown tool field" in rejected.raw_response["message"]
+    assert "stage" not in rejected.public_response
+    assert "latest_observation_id" not in rejected.public_response
     assert len(simulator.calls) == before
 
 
@@ -243,7 +349,9 @@ def test_level1_cannot_claim_tactile_evidence(tmp_path: Path) -> None:
         },
     )
     assert rejected.success is False
-    assert "unavailable at Level 1" in rejected.public_response["message"]
+    assert "Level 1" not in rejected.public_response["message"]
+    assert rejected.raw_response is not None
+    assert "unavailable at Level 1" in rejected.raw_response["message"]
     assert len(simulator.calls) == 1
 
 
@@ -295,6 +403,24 @@ def test_level3_receives_success_only_after_irreversible_commit(tmp_path: Path) 
     assert waited.public_response["feedback"]["task_success"] is False
 
 
+def test_tactile_health_statistics_are_host_only(tmp_path: Path) -> None:
+    gateway, _ = started_gateway(tmp_path, level=2)
+    start = CapabilityGateway(
+        level=2,
+        simulator_request=FakeSimulator(tmp_path / "second", 2),
+        simulator_run_dir=tmp_path / "second",
+    ).execute("start_episode", {"agent_note": "fresh"})
+    assert start.raw_response is not None
+    assert "tactile_health" in start.raw_response["observation"]
+    assert "tactile_health" not in start.public_response["observation"]
+    assert set(start.public_response["observation"]["modalities"]) == {
+        "head_rgb",
+        "wrist_rgb",
+        "left_tactile_marker",
+        "right_tactile_marker",
+    }
+
+
 def test_stale_observation_and_out_of_bounds_action_are_host_rejected(tmp_path: Path) -> None:
     gateway, simulator = started_gateway(tmp_path, level=1)
     gateway.execute(
@@ -331,6 +457,43 @@ def test_stale_observation_and_out_of_bounds_action_are_host_rejected(tmp_path: 
     assert stale.decision_record == decision()
     assert oversized.decision_record == decision()
     assert len(simulator.calls) == before
+    assert stale.public_response["observation_id"] == "obs_000"
+    assert oversized.public_response["observation_id"] == "obs_000"
+    assert stale.public_response["message"].startswith(
+        "Use the exact observation_id"
+    )
+    assert oversized.public_response["message"] == (
+        "Tool arguments do not satisfy the published input schema."
+    )
+    for response in (stale.public_response, oversized.public_response):
+        rendered = json.dumps(response)
+        assert "stage" not in rendered
+        assert "remaining" not in rendered
+
+
+def test_terminal_truth_is_kept_out_of_agent_result(tmp_path: Path) -> None:
+    gateway, _ = started_gateway(tmp_path, level=1)
+    gateway.execute(
+        "commit_classification",
+        {
+            "observation_id": "obs_000",
+            "predicted_class": "rough",
+            "target_pad": "orange",
+            "decision_record": decision(),
+        },
+    )
+    finished = gateway.execute(
+        "finish_episode",
+        {
+            "observation_id": "obs_000",
+            "final_note": "done",
+            "decision_record": decision(),
+        },
+    )
+    assert finished.public_response == {"status": "rollout_finished"}
+    assert finished.raw_response is not None
+    assert finished.raw_response["true_class"] == "rough"
+    assert finished.raw_response["official_task_success"] is False
 
 
 def test_artifact_escape_is_rejected(tmp_path: Path) -> None:

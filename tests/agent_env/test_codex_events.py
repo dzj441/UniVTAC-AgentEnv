@@ -182,6 +182,7 @@ def test_runtime_and_tool_summaries_use_terminal_app_server_state(
     assert summarize_tool_calls(recorder.tool_path) == {
         "total": 2,
         "relayed_to_simulator": 0,
+        "relayed_to_perception": 0,
         "host_rejected": 2,
         "successful_results": 1,
         "failed_results": 1,

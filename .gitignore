@@ -56,6 +56,9 @@ textures.zip
 
 /agent_runs/
 /ghp
+/hf_token
+/.semantic_models
+/.semantic_runtime/
 /sicheng/
 /temp
 /third_party/IsaacLab/

@@ -40,7 +40,6 @@ def test_submit_prediction_is_required_irreversible_and_semantically_consistent(
         "predicted_class": "rough",
         "committed_target": "orange",
         "irreversible": True,
-        "guidance_unlocked": True,
     }
     with pytest.raises(ProtocolError, match="irreversible"):
         protocol.submit_prediction(
@@ -90,33 +89,28 @@ def test_level3_success_auto_stop_is_enabled_only_after_prediction() -> None:
     assert not protocol.should_auto_stop(False)
 
 
-def test_committed_target_halfspace_cannot_change() -> None:
+def test_committed_target_does_not_constrain_physical_exploration() -> None:
     protocol = started_protocol()
-    submit_rough(protocol)  # orange is negative world y
+    submit_rough(protocol)
 
-    _, _, _, prepared = protocol.prepare_delta(
+    protocol.prepare_delta(
         observation_id="obs_000",
-        delta_position=[0.01, -0.03, 0.0],
+        delta_position=[0.01, 0.03, 0.0],
         delta_rpy=[0, 0, 0],
         delta_gripper=0,
     )
-    protocol.complete_delta(prepared, "obs_001")
-    assert protocol.target_halfspace_locked
+    protocol.complete_delta("obs_001")
+    protocol.prepare_delta(
+        observation_id="obs_001",
+        delta_position=[0.0, -0.04, 0.0],
+        delta_rpy=[0, 0, 0],
+        delta_gripper=0,
+    )
 
-    with pytest.raises(ProtocolError, match="leaves the locked target region"):
-        protocol.prepare_delta(
-            observation_id="obs_001",
-            delta_position=[0.0, 0.02, 0.0],
-            delta_rpy=[0, 0, 0],
-            delta_gripper=0,
-        )
-    with pytest.raises(ProtocolError, match="opposite pad half-space"):
-        protocol.prepare_delta(
-            observation_id="obs_001",
-            delta_position=[0.0, 0.04, 0.0],
-            delta_rpy=[0, 0, 0],
-            delta_gripper=0,
-        )
+    # The categorical commitment remains immutable, but neither world-Y sign
+    # is blocked or labelled for the agent.
+    assert protocol.predicted_class == "rough"
+    assert protocol.committed_target == "orange"
 
 
 def test_world_change_requires_fresh_observation_and_rejects_stale_commands() -> None:
@@ -131,6 +125,7 @@ def test_world_change_requires_fresh_observation_and_rejects_stale_commands() ->
 
 def test_action_bounds_and_budget_are_enforced() -> None:
     protocol = started_protocol()
+    assert protocol.MAX_POST_PREDICTION_ACTIONS == 20
     submit_rough(protocol)
     with pytest.raises(ProtocolError, match="per-component"):
         protocol.prepare_delta(
@@ -143,13 +138,13 @@ def test_action_bounds_and_budget_are_enforced() -> None:
     for index in range(protocol.MAX_POST_PREDICTION_ACTIONS):
         observation_id = f"obs_{index:03d}"
         next_observation_id = f"obs_{index + 1:03d}"
-        _, _, _, prepared = protocol.prepare_delta(
+        protocol.prepare_delta(
             observation_id=observation_id,
             delta_position=[0, 0, 0],
             delta_rpy=[0, 0, 0],
             delta_gripper=0,
         )
-        protocol.complete_delta(prepared, next_observation_id)
+        protocol.complete_delta(next_observation_id)
 
     with pytest.raises(ProtocolError, match="budget is exhausted"):
         protocol.prepare_wait(protocol.current_observation_id, 1)

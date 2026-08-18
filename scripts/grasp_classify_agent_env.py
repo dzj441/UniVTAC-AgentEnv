@@ -43,7 +43,7 @@ from agent_env.contract import (
     validate_command_fields,
 )
 from agent_env.profiles import AgentEnvProfile, get_profile
-from agent_env.protocol import EpisodeProtocol, PreparedDelta
+from agent_env.protocol import EpisodeProtocol
 from agent_env.nvidia_runtime import audit_current_process
 from agent_env.serialization import serialize_observation
 
@@ -129,6 +129,9 @@ class GraspClassifyAgentEnv:
         self.profile = profile
         self.run_dir = run_dir.resolve()
         self.observation_root = self.run_dir / "observations"
+        self.host_sensor_metadata_root = self.run_dir / ".host_sensor_metadata"
+        self.host_sensor_metadata_root.mkdir(parents=True, exist_ok=True)
+        os.chmod(self.host_sensor_metadata_root, 0o700)
         self.public_transcript_path = self.run_dir / "agent_transcript.jsonl"
         self.outcome_path = self.run_dir / "evaluator_outcome.json"
         self.private_audit_path = self.run_dir / "evaluator_private_audit.json"
@@ -162,15 +165,15 @@ class GraspClassifyAgentEnv:
                 "forbidden_agent_observations": [
                     "actor/object/pad pose",
                     "selected prism class before terminal outcome",
-                    "depth",
+                    "raw simulator camera depth",
                     "camera intrinsics/extrinsics",
                     "contact force or reward",
                     "task success at Level 1 or Level 2",
                     "task success before submit_prediction at Level 3",
                 ],
                 "execution_feedback_note": (
-                    "execution_succeeded is public at all levels and only reports whether "
-                    "the low-level command executed; it is not the task checker"
+                    "execution_succeeded is retained for host audit but removed from the "
+                    "agent-visible projection; the next robot state is the action feedback"
                 ),
                 "rendering": "official evaluator-compatible livestream=2 experience",
                 "nvidia_userspace": {
@@ -187,6 +190,11 @@ class GraspClassifyAgentEnv:
                     "public": "agent_transcript.jsonl and evaluator_outcome.json",
                     "private_until_terminal": "evaluator_private_audit.json is materialized at terminal",
                 },
+                "semantic_perception_host_contract": (
+                    "Exact camera intrinsics are stored in a mode-0600 host sidecar for "
+                    "calibrated derived models. They are never serialized into the public "
+                    "observation, transcript, Codex prompt, or tool response."
+                ),
                 "threat_model": (
                     "The API and public transcript prevent accidental information leakage. "
                     "Adversarial OS-level isolation still requires running the agent under a "
@@ -243,6 +251,7 @@ class GraspClassifyAgentEnv:
             "head_rgb": save_rgb(obs_dir / "head_rgb.png", head),
             "wrist_rgb": save_rgb(obs_dir / "wrist_rgb.png", wrist),
         }
+        self._write_host_camera_metadata(observation_id, head, wrist)
         panels = [("head_rgb", head), ("wrist_rgb", wrist)]
         tactile_health: dict[str, Any] | None = None
 
@@ -301,6 +310,44 @@ class GraspClassifyAgentEnv:
         )
         self.record_public("observation", {"observation": observation})
         return observation
+
+    def _write_host_camera_metadata(
+        self,
+        observation_id: str,
+        head: np.ndarray,
+        wrist: np.ndarray,
+    ) -> None:
+        """Persist calibrated K for host tools without widening the agent surface."""
+
+        cameras: dict[str, Any] = {}
+        for public_name, internal_name, image in (
+            ("head_rgb", "head", head),
+            ("wrist_rgb", "wrist", wrist),
+        ):
+            tensor = self.task._camera_manager.cameras[
+                internal_name
+            ].data.intrinsic_matrices
+            matrix = np.asarray(tensor[0].detach().cpu(), dtype=np.float64)
+            if matrix.shape != (3, 3) or not np.isfinite(matrix).all():
+                raise RuntimeError(f"Invalid calibrated intrinsics for {internal_name}")
+            height, width = int(image.shape[0]), int(image.shape[1])
+            fx, fy = float(matrix[0, 0]), float(matrix[1, 1])
+            cx, cy = float(matrix[0, 2]), float(matrix[1, 2])
+            if fx <= 0 or fy <= 0 or not (0 <= cx < width and 0 <= cy < height):
+                raise RuntimeError(f"Out-of-range calibrated intrinsics for {internal_name}")
+            cameras[public_name] = {
+                "width": width,
+                "height": height,
+                "intrinsics": {"fx": fx, "fy": fy, "cx": cx, "cy": cy},
+            }
+        write_private_json(
+            self.host_sensor_metadata_root / f"{observation_id}.json",
+            {
+                "schema_version": "univtac.host_sensor_metadata.v1",
+                "observation_id": observation_id,
+                "cameras": cameras,
+            },
+        )
 
     def _internal_task_success(self) -> bool:
         return bool(self.task.eval_success or self.task.check_success())
@@ -414,20 +461,17 @@ class GraspClassifyAgentEnv:
             "remaining_post_prediction_actions": (
                 self.protocol.MAX_POST_PREDICTION_ACTIONS - self.protocol.action_count
             ),
-            "targetward_world_y_sign": self.protocol.TARGET_Y_SIGN[
-                self.protocol.committed_target
-            ],
         }
 
     def act(self, command: dict[str, Any]) -> dict[str, Any]:
         rationale = self._require_rationale(command)
-        dp, dr, dg, prepared = self.protocol.prepare_delta(
+        dp, dr, dg = self.protocol.prepare_delta(
             observation_id=command.get("observation_id"),
             delta_position=command.get("delta_position", [0, 0, 0]),
             delta_rpy=command.get("delta_rpy", [0, 0, 0]),
             delta_gripper=command.get("delta_gripper", 0),
         )
-        return self._execute_post_prediction_delta(command, rationale, dp, dr, dg, prepared)
+        return self._execute_post_prediction_delta(command, rationale, dp, dr, dg)
 
     def _execute_post_prediction_delta(
         self,
@@ -436,7 +480,6 @@ class GraspClassifyAgentEnv:
         dp: np.ndarray,
         dr: np.ndarray,
         dg: float,
-        prepared: PreparedDelta,
     ) -> dict[str, Any]:
         prior_observation_id = self.protocol.current_observation_id
         action_vector = np.concatenate((dp, dr, [dg])).astype(np.float32)
@@ -447,7 +490,7 @@ class GraspClassifyAgentEnv:
         self._observe_internal_success(internal_success)
 
         next_observation_id = self._next_observation_id()
-        self.protocol.complete_delta(prepared, next_observation_id)
+        self.protocol.complete_delta(next_observation_id)
         observation = self._capture_observation(next_observation_id)
         feedback = self.protocol.public_action_feedback(
             execution_succeeded=bool(executed), internal_task_success=internal_success
@@ -471,8 +514,6 @@ class GraspClassifyAgentEnv:
                 "delta_gripper": dg,
             },
             "committed_target": self.protocol.committed_target,
-            "cumulative_y_m": self.protocol.cumulative_y_m,
-            "target_halfspace_locked": self.protocol.target_halfspace_locked,
             "feedback": feedback,
             "execution_duration_seconds": duration,
             "observation": observation,
@@ -511,8 +552,6 @@ class GraspClassifyAgentEnv:
             "rationale": rationale,
             "action": {"primitive": "wait", "physics_steps": steps},
             "committed_target": self.protocol.committed_target,
-            "cumulative_y_m": self.protocol.cumulative_y_m,
-            "target_halfspace_locked": self.protocol.target_halfspace_locked,
             "feedback": feedback,
             "execution_duration_seconds": duration,
             "observation": observation,

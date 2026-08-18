@@ -1,0 +1,20 @@
+{
+  "schema_version": "univtac.semantic_tools_lock.v1",
+  "openeta_reference_commit": "fbf102dfd30e44b981d50f1c29dede4274eaaf8f",
+  "torch": "2.10.0",
+  "torchvision": "0.25.0",
+  "sam3": {
+    "source_url": "https://github.com/facebookresearch/sam3.git",
+    "source_commit": "8f0b7f4d4e7eda2ed606ebde6702c93359ad01da",
+    "model_id": "facebook/sam3",
+    "model_revision": "3c879f39826c281e95690f02c7821c4de09afae7",
+    "files": ["sam3.pt"]
+  },
+  "unidepth_v2": {
+    "source_url": "https://github.com/lpiccinelli-eth/UniDepth.git",
+    "source_commit": "8d8cfe4c7ee15297099983607febf0d4f32eb3d6",
+    "model_id": "lpiccinelli/unidepth-v2-vitl14",
+    "model_revision": "52b349b514bd8b47642f67ac78cb7b5dc5c51dd9",
+    "files": ["config.json", "model.safetensors"]
+  }
+}
