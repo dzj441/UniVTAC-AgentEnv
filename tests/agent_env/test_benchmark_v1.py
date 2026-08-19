@@ -34,7 +34,14 @@ from agent_env.benchmark_protocol import (
 )
 from agent_env.benchmark_tasks import get_benchmark_task, list_benchmark_tasks
 from agent_env.capabilities import CapabilityViolation
-from scripts.run_codex_benchmark import operator_prompt
+from agent_env.contract import EVALUATOR_SEED_ENV
+from agent_env.icl import get_icl_condition, list_icl_conditions
+from scripts.run_codex_benchmark import (
+    codex_sandbox_policy,
+    effective_codex_network_access,
+    operator_prompt,
+    validate_fixed_demo_evaluation_seed,
+)
 
 
 def decision(source: str = "head_rgb") -> dict:
@@ -126,6 +133,87 @@ def test_operator_prompt_discloses_configured_episode_token_budget() -> None:
     assert "makes the benchmark result a failure" in limited
 
 
+def test_action_per_turn_prompt_preserves_one_episode_without_single_turn_rule() -> None:
+    single = operator_prompt(
+        "pull_out_key",
+        pre_move=False,
+        interaction_mode="single_turn",
+    )
+    multi = operator_prompt(
+        "pull_out_key",
+        pre_move=False,
+        interaction_mode="action_per_turn",
+    )
+    assert "Do not end the turn while the episode is active" in single
+    assert "Do not end the turn while the episode is active" not in multi
+    assert "Execute exactly one episode" in multi
+    assert "Begin with start_episode" in multi
+    assert "call finish_episode" in multi
+
+
+def test_icl_axis_and_minimal_demo_discovery_notice() -> None:
+    assert [condition.name for condition in list_icl_conditions()] == [
+        "none",
+        "fixed_demo",
+    ]
+    without_demo = operator_prompt(
+        "pull_out_key",
+        pre_move=False,
+        icl_condition="none",
+    )
+    with_demo = operator_prompt(
+        "pull_out_key",
+        pre_move=False,
+        icl_condition="fixed_demo",
+    )
+    assert "benchmark_inputs/expert_demo" not in without_demo
+    assert "benchmark_inputs/expert_demo/" in with_demo
+    assert "observed expert waypoints" not in with_demo
+    assert "step_eef actions" not in with_demo
+
+
+def test_codex_sandbox_and_network_policy_are_explicit(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    assert codex_sandbox_policy(
+        "workspace-write",
+        workspace=workspace,
+        network_access=True,
+    ) == {
+        "type": "workspaceWrite",
+        "writableRoots": [str(workspace.resolve())],
+        "networkAccess": True,
+    }
+    assert effective_codex_network_access("read-only", False) is False
+    assert effective_codex_network_access("workspace-write", True) is True
+    assert effective_codex_network_access("danger-full-access", False) is True
+    assert codex_sandbox_policy(
+        "danger-full-access",
+        workspace=workspace,
+        network_access=True,
+    ) == {"type": "dangerFullAccess"}
+
+
+def test_fixed_demo_excludes_its_seed_from_evaluation() -> None:
+    fixed_demo = get_icl_condition("fixed_demo")
+    with pytest.raises(ValueError, match="must differ"):
+        validate_fixed_demo_evaluation_seed(
+            task_name="pull_out_key",
+            icl_condition=fixed_demo,
+            environ={EVALUATOR_SEED_ENV: "0"},
+        )
+    validate_fixed_demo_evaluation_seed(
+        task_name="pull_out_key",
+        icl_condition=fixed_demo,
+        environ={EVALUATOR_SEED_ENV: "10000000"},
+    )
+    validate_fixed_demo_evaluation_seed(
+        task_name="put_bottle_in_shelf",
+        icl_condition=get_icl_condition("none"),
+        environ={EVALUATOR_SEED_ENV: "1"},
+    )
+
+
 def test_protocol_accepts_zero_step_and_enforces_all_bounds() -> None:
     protocol = BenchmarkEpisodeProtocol(get_observation_profile(6))
     assert protocol.MAX_STEPS == 50
@@ -170,6 +258,17 @@ def test_dynamic_registry_contains_exactly_three_tools() -> None:
     assert "object_bbox" in sources
     assert "object_mask" in sources
     assert "camera_extrinsics" in sources
+    assert "expert_demo" not in sources
+
+    fixed_demo_registry = build_benchmark_tool_registry(
+        get_observation_profile(6),
+        AnnotationCapabilities(True, True),
+        get_icl_condition("fixed_demo"),
+    )
+    fixed_demo_sources = fixed_demo_registry["step_eef"].input_schema["properties"][
+        "decision_record"
+    ]["properties"]["evidence"]["items"]["properties"]["source"]["enum"]
+    assert "expert_demo" in fixed_demo_sources
 
 
 def test_capability_manifest_is_deterministic_and_task_specific() -> None:
@@ -185,6 +284,14 @@ def test_capability_manifest_is_deterministic_and_task_specific() -> None:
     assert digest == hashlib.sha256(canonical.encode()).hexdigest()
     assert manifest["task"]["name"] == "pull_out_key"
     assert manifest["task"]["start_condition"] == "ungrasped"
+    assert manifest["icl"] == {
+        "name": "none",
+        "fixed_demo_available": False,
+    }
+    assert not any(
+        "shell" in capability
+        for capability in manifest["forbidden_agent_capabilities"]
+    )
 
     legacy = benchmark_capability_manifest(
         get_benchmark_task("pull_out_key"),
@@ -194,6 +301,15 @@ def test_capability_manifest_is_deterministic_and_task_specific() -> None:
     )
     assert legacy["task"]["start_condition"] == "pregrasped"
     assert legacy["sha256"] != digest
+
+    fixed_demo = benchmark_capability_manifest(
+        get_benchmark_task("pull_out_key"),
+        get_observation_profile(6),
+        AnnotationCapabilities(True, True),
+        icl_condition="fixed_demo",
+    )
+    assert fixed_demo["icl"]["workspace_path"] == "benchmark_inputs/expert_demo"
+    assert fixed_demo["sha256"] != digest
 
 
 def test_public_wire_schema_excludes_host_close() -> None:
@@ -258,6 +374,122 @@ def test_gateway_strips_paths_attaches_images_and_hides_success(tmp_path: Path) 
                 "decision_record": decision(),
             },
         )
+
+
+def test_gateway_publishes_only_current_metric_depth_and_raw_masks(
+    tmp_path: Path,
+) -> None:
+    import json
+    import numpy as np
+
+    run_dir = tmp_path / "evaluator_run"
+    workspace = tmp_path / "agent_workspace"
+    workspace.mkdir()
+
+    def observation(observation_id: str, *, include_mask: bool) -> dict:
+        directory = run_dir / "observations" / observation_id
+        depth_path = directory / "head" / "depth_m.npy"
+        depth_path.parent.mkdir(parents=True, exist_ok=True)
+        np.save(depth_path, np.full((2, 2), 0.5, dtype=np.float32))
+        depth_sha = hashlib.sha256(depth_path.read_bytes()).hexdigest()
+        payload = {
+            "observation_id": observation_id,
+            "modalities": {
+                "head_depth": {
+                    "depth_m": {
+                        "path": str(depth_path),
+                        "sha256": depth_sha,
+                        "media_type": "application/x-npy",
+                        "dtype": "float32",
+                        "shape": [2, 2],
+                        "unit": "metre",
+                    }
+                }
+            },
+            "robot_state": {},
+        }
+        if include_mask:
+            mask_path = (
+                directory
+                / "annotations"
+                / "head"
+                / "manipulated_object_mask.png"
+            )
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.new("L", (2, 2), 255).save(mask_path)
+            payload["annotations"] = {
+                "head": {
+                    "manipulated_object": {
+                        "mask": {
+                            "path": str(mask_path),
+                            "sha256": hashlib.sha256(mask_path.read_bytes()).hexdigest(),
+                            "media_type": "image/png",
+                            "content_image": False,
+                        }
+                    }
+                }
+            }
+        return payload
+
+    responses = iter(
+        [
+            {
+                "status": "rollout_started",
+                "observation": observation("obs_000", include_mask=True),
+            },
+            {
+                "status": "action_complete",
+                "observation": observation("obs_001", include_mask=False),
+            },
+        ]
+    )
+    gateway = BenchmarkCapabilityGateway(
+        task=get_benchmark_task("pull_out_key"),
+        profile=get_observation_profile(6),
+        annotations=AnnotationCapabilities(False, True),
+        simulator_request=lambda _: next(responses),
+        simulator_run_dir=run_dir,
+        agent_workspace=workspace,
+    )
+    started = gateway.execute("start_episode", {"agent_note": "test current files"})
+    depth = started.public_response["observation"]["modalities"]["head_depth"][
+        "depth_m"
+    ]
+    assert depth["workspace_path"] == (
+        "benchmark_inputs/current_observation/head/depth_m.npy"
+    )
+    old_mask = (
+        workspace
+        / "benchmark_inputs/current_observation/annotations/head/"
+        "manipulated_object_mask.png"
+    )
+    assert old_mask.is_file()
+    initial_manifest = json.loads(
+        (
+            workspace / "benchmark_inputs/current_observation/manifest.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert initial_manifest["observation_id"] == "obs_000"
+
+    stepped = gateway.execute(
+        "step_eef",
+        {
+            "observation_id": "obs_000",
+            "delta_position": [0.0, 0.0, 0.0],
+            "delta_rpy": [0.0, 0.0, 0.0],
+            "delta_gripper": 0.0,
+            "decision_record": decision("head_depth"),
+        },
+    )
+    assert stepped.success
+    assert not old_mask.exists()
+    latest_manifest = json.loads(
+        (
+            workspace / "benchmark_inputs/current_observation/manifest.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert latest_manifest["observation_id"] == "obs_001"
+    assert latest_manifest["retention"] == "current_observation_only"
 
 
 def test_native_depth_and_anonymous_annotation_artifacts(tmp_path: Path) -> None:

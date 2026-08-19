@@ -62,11 +62,13 @@ class CodexAppServerClient:
         stderr_path: Path,
         env: dict[str, str] | None = None,
         timeout_seconds: float = 3600.0,
+        enforce_embodied_only: bool = True,
     ) -> None:
         self.command = tuple(command)
         self.cwd = cwd.resolve()
         self.recorder = recorder
         self.timeout_seconds = timeout_seconds
+        self.enforce_embodied_only = enforce_embodied_only
         self.thread_id: str | None = None
         self.turn_id: str | None = None
         self.capability_violation = False
@@ -177,20 +179,22 @@ class CodexAppServerClient:
         model: str | None,
         base_instructions: str,
         developer_instructions: str,
+        sandbox: str = "read-only",
     ) -> dict[str, Any]:
         params: dict[str, Any] = {
             "cwd": str(self.cwd),
             "approvalPolicy": "never",
-            "sandbox": "read-only",
+            "sandbox": sandbox,
             "ephemeral": True,
             "experimentalRawEvents": False,
             "dynamicTools": gateway.dynamic_tools(),
             "baseInstructions": base_instructions,
             "developerInstructions": developer_instructions,
-            "environments": [],
             "runtimeWorkspaceRoots": [str(self.cwd)],
             "serviceName": "univtac-agentenv",
         }
+        if self.enforce_embodied_only:
+            params["environments"] = []
         if model:
             params["model"] = model
         result = self._request("thread/start", params)
@@ -204,24 +208,40 @@ class CodexAppServerClient:
         self,
         *,
         gateway: CapabilityGateway,
-        prompt: str,
+        prompt: str | None,
         model: str | None,
         effort: str,
         reasoning_summary: str = "detailed",
         task_name: str = "grasp_classify",
         profile_name: str | None = None,
+        sandbox_policy: dict[str, Any] | None = None,
+        input_items: Sequence[dict[str, Any]] | None = None,
+        interrupt_after_dynamic_tool: bool = False,
+        defer_dynamic_tool_content: bool = False,
     ) -> dict[str, Any]:
         if self.thread_id is None:
             raise CodexAppServerError("start_thread must be called first")
+        if defer_dynamic_tool_content and not interrupt_after_dynamic_tool:
+            raise ValueError(
+                "Deferred dynamic-tool content requires a turn boundary"
+            )
+        if input_items is None:
+            if not isinstance(prompt, str) or not prompt:
+                raise ValueError("run_turn requires a non-empty prompt or input_items")
+            turn_input = [{"type": "text", "text": prompt}]
+        else:
+            if prompt is not None:
+                raise ValueError("prompt and input_items are mutually exclusive")
+            turn_input = self._validate_turn_input(input_items)
         request_id = self._next_id()
         params: dict[str, Any] = {
             "threadId": self.thread_id,
-            "input": [{"type": "text", "text": prompt}],
+            "input": turn_input,
             "cwd": str(self.cwd),
             "approvalPolicy": "never",
-            "sandboxPolicy": {"type": "readOnly", "networkAccess": False},
+            "sandboxPolicy": sandbox_policy
+            or {"type": "readOnly", "networkAccess": False},
             "runtimeWorkspaceRoots": [str(self.cwd)],
-            "environments": [],
             "effort": effort,
             "summary": reasoning_summary,
             "responsesapiClientMetadata": {
@@ -230,12 +250,18 @@ class CodexAppServerClient:
                 "profile": profile_name or str(gateway.profile.level),
             },
         }
+        if self.enforce_embodied_only:
+            params["environments"] = []
         if model:
             params["model"] = model
         self._send({"id": request_id, "method": "turn/start", "params": params})
         deadline = time.monotonic() + self.timeout_seconds
         start_response: dict[str, Any] | None = None
         terminal_notification: dict[str, Any] | None = None
+        dynamic_tool_call_count = 0
+        interrupt_requested = False
+        last_dynamic_tool: str | None = None
+        deferred_input_items: list[dict[str, Any]] | None = None
 
         while time.monotonic() < deadline:
             message = self._get_message(deadline)
@@ -257,9 +283,57 @@ class CodexAppServerClient:
             ):
                 self.turn_id = message_params["turnId"]
             if method == "item/tool/call":
-                self._handle_dynamic_tool(message, gateway)
+                if interrupt_after_dynamic_tool and dynamic_tool_call_count:
+                    self._fail_capability(
+                        reason="multiple_embodied_tools_in_action_turn",
+                        evidence={
+                            "turn_id": self.turn_id,
+                            "first_tool": last_dynamic_tool,
+                            "additional_tool": message_params.get("tool")
+                            if isinstance(message_params, dict)
+                            else None,
+                        },
+                    )
+                    raise CapabilityViolation(
+                        "action-per-turn mode received more than one embodied tool call"
+                    )
+                execution = self._handle_dynamic_tool(
+                    message,
+                    gateway,
+                    defer_content=defer_dynamic_tool_content,
+                )
+                dynamic_tool_call_count += 1
+                last_dynamic_tool = execution.tool
+                if defer_dynamic_tool_content and not gateway.terminal:
+                    deferred_input_items = self.tool_content_to_turn_input(
+                        execution.content_items
+                    )
+                if interrupt_after_dynamic_tool and not gateway.terminal:
+                    self.interrupt_turn()
+                    interrupt_requested = True
                 continue
             if isinstance(method, str) and method in FORBIDDEN_SERVER_REQUESTS:
+                if not self.enforce_embodied_only:
+                    self.recorder.record_message(
+                        {
+                            "kind": "unhandled_runtime_server_request",
+                            "method": method,
+                            "params": message.get("params"),
+                        }
+                    )
+                    self._send(
+                        {
+                            "id": message.get("id"),
+                            "error": {
+                                "code": -32601,
+                                "message": (
+                                    "The non-interactive benchmark runner cannot service "
+                                    "this runtime request"
+                                ),
+                            },
+                        }
+                    )
+                    continue
                 self._fail_capability(
                     reason="forbidden_server_request",
                     evidence={"method": method, "params": message.get("params")},
@@ -275,6 +349,24 @@ class CodexAppServerClient:
                 )
                 raise CapabilityViolation(f"Codex requested forbidden capability {method}")
             if isinstance(method, str) and "id" in message:
+                if not self.enforce_embodied_only:
+                    self.recorder.record_message(
+                        {
+                            "kind": "unhandled_runtime_server_request",
+                            "method": method,
+                            "params": message.get("params"),
+                        }
+                    )
+                    self._send(
+                        {
+                            "id": message.get("id"),
+                            "error": {
+                                "code": -32601,
+                                "message": "Unsupported App Server request",
+                            },
+                        }
+                    )
+                    continue
                 self._fail_capability(
                     reason="unknown_server_request_fail_closed",
                     evidence={"method": method, "params": message.get("params")},
@@ -314,13 +406,89 @@ class CodexAppServerClient:
             "start_response": start_response,
             "gateway_terminal": gateway.terminal,
             "capability_violation": self.capability_violation,
+            "dynamic_tool_call_count": dynamic_tool_call_count,
+            "last_dynamic_tool": last_dynamic_tool,
+            "interrupted_after_dynamic_tool": interrupt_requested,
+            "deferred_input_items": deferred_input_items,
         }
+
+    @staticmethod
+    def _validate_turn_input(
+        input_items: Sequence[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Validate the public text/image subset accepted by turn/start."""
+
+        if not input_items:
+            raise ValueError("input_items must not be empty")
+        normalized: list[dict[str, Any]] = []
+        for item in input_items:
+            if not isinstance(item, dict):
+                raise ValueError("Each turn input item must be an object")
+            item_type = item.get("type")
+            if item_type == "text":
+                if set(item) != {"type", "text"} or not isinstance(
+                    item.get("text"), str
+                ):
+                    raise ValueError("Text turn inputs require only type and text")
+            elif item_type == "image":
+                if not {"type", "url"} <= set(item) or set(item) - {
+                    "type",
+                    "url",
+                    "detail",
+                }:
+                    raise ValueError(
+                        "Image turn inputs require type/url and optional detail"
+                    )
+                if not isinstance(item.get("url"), str) or not item["url"]:
+                    raise ValueError("Image turn input url must be non-empty")
+                if item.get("detail") not in {None, "auto", "low", "high", "original"}:
+                    raise ValueError("Unsupported image detail")
+            else:
+                raise ValueError("Only public text and image turn inputs are supported")
+            normalized.append(dict(item))
+        return normalized
+
+    @classmethod
+    def tool_content_to_turn_input(
+        cls,
+        content_items: Sequence[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Convert an allowlisted dynamic-tool payload into next-turn input."""
+
+        turn_input: list[dict[str, Any]] = []
+        for item in content_items:
+            if not isinstance(item, dict):
+                raise CodexAppServerError("Dynamic-tool content item must be an object")
+            item_type = item.get("type")
+            if item_type == "inputText":
+                text = item.get("text")
+                if not isinstance(text, str):
+                    raise CodexAppServerError(
+                        "Dynamic-tool inputText content requires text"
+                    )
+                turn_input.append({"type": "text", "text": text})
+            elif item_type == "inputImage":
+                image_url = item.get("imageUrl")
+                if not isinstance(image_url, str) or not image_url:
+                    raise CodexAppServerError(
+                        "Dynamic-tool inputImage content requires imageUrl"
+                    )
+                turn_input.append(
+                    {"type": "image", "url": image_url, "detail": "auto"}
+                )
+            else:
+                raise CodexAppServerError(
+                    f"Unsupported dynamic-tool content type {item_type!r}"
+                )
+        return cls._validate_turn_input(turn_input)
 
     def _handle_dynamic_tool(
         self,
         message: dict[str, Any],
         gateway: CapabilityGateway,
-    ) -> None:
+        *,
+        defer_content: bool = False,
+    ) -> GatewayExecution:
         request_id = message.get("id")
         params = message.get("params", {})
         if not isinstance(params, dict):
@@ -354,15 +522,31 @@ class CodexAppServerClient:
             arguments=arguments,
             duration_seconds=time.monotonic() - started,
         )
+        content_items = list(execution.content_items)
+        if defer_content and not gateway.terminal:
+            content_items = [
+                {
+                    "type": "inputText",
+                    "text": json.dumps(
+                        {
+                            "status": "result_deferred_to_next_turn",
+                            "tool": execution.tool,
+                            "success": execution.success,
+                        },
+                        ensure_ascii=False,
+                    ),
+                }
+            ]
         self._send(
             {
                 "id": request_id,
                 "result": {
                     "success": execution.success,
-                    "contentItems": list(execution.content_items),
+                    "contentItems": content_items,
                 },
             }
         )
+        return execution
 
     def _record_execution(
         self,
@@ -413,7 +597,7 @@ class CodexAppServerClient:
         if not isinstance(item, dict):
             return
         item_type = item.get("type")
-        if item_type in FORBIDDEN_ITEM_TYPES:
+        if self.enforce_embodied_only and item_type in FORBIDDEN_ITEM_TYPES:
             self._fail_capability(
                 reason="forbidden_codex_item",
                 evidence={
@@ -424,7 +608,9 @@ class CodexAppServerClient:
             )
             self.interrupt_turn()
             raise CapabilityViolation(f"Codex emitted forbidden item type {item_type}")
-        if not isinstance(item_type, str) or item_type not in ALLOWED_ITEM_TYPES:
+        if self.enforce_embodied_only and (
+            not isinstance(item_type, str) or item_type not in ALLOWED_ITEM_TYPES
+        ):
             self._fail_capability(
                 reason="unknown_codex_item_fail_closed",
                 evidence={
@@ -437,6 +623,15 @@ class CodexAppServerClient:
             raise CapabilityViolation(
                 f"Codex emitted an unrecognized item type {item_type!r}"
             )
+        if not self.enforce_embodied_only and not isinstance(item_type, str):
+            self.recorder.record_message(
+                {
+                    "kind": "runtime_item_without_type",
+                    "method": message.get("method"),
+                    "item_id": item.get("id"),
+                }
+            )
+            return
         if message.get("method") != "item/completed":
             return
         if item_type == "agentMessage":

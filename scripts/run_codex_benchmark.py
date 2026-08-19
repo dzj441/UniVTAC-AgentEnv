@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 import traceback
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -51,27 +52,36 @@ from agent_env.codex_isolation import (  # noqa: E402
     IsolatedCodexEnvironment,
     embodied_codex_command,
 )
+from agent_env.contract import EVALUATOR_SEED_ENV  # noqa: E402
+from agent_env.fixed_demo_bundle import (  # noqa: E402
+    get_fixed_demo_asset_spec,
+    project_fixed_demo_bundle,
+    resolve_fixed_demo_root,
+)
+from agent_env.icl import (  # noqa: E402
+    ICLCondition,
+    get_icl_condition,
+    list_icl_conditions,
+)
 from agent_env.stdio_bridge import SimulatorProcessClient  # noqa: E402
 
 
 BASE_INSTRUCTIONS = """\
 You are the control policy in an agentic embodied benchmark. The host owns the
-simulator and exposes an intentionally small set of typed embodied tools. Use
-only those tools. Do not request shell commands, files, web access, MCP/apps,
-plugins, skills, subagents, arbitrary code, inverse kinematics, joint targets,
-trajectory planning, or simulator internals. A capability that is absent is
-unavailable, not an invitation to reconstruct or bypass it.
+simulator and exposes three typed embodied tools. Robot interaction must use
+only start_episode, step_eef, and finish_episode. General runtime capabilities
+may be used to inspect or transform the public benchmark inputs and to support
+reasoning, but they do not provide a second simulator-control path.
 
 All externally meaningful reasoning must be placed in each tool's structured
-decision_record. Ground evidence only in the latest observation and only in
-sources accepted by the tool schema. The host records published reasoning
-summaries and agent messages, but hidden model reasoning is not an observable
-benchmark artifact.
+decision_record. Cite only public sources accepted by that tool's schema. Task
+success is available only from finish_episode. The host records published
+reasoning summaries and agent messages, but hidden model reasoning is not an
+observable benchmark artifact.
 """
 
 DEVELOPER_INSTRUCTIONS = """\
-This is a single-agent benchmark. Never delegate. Treat the dynamic embodied
-tools as the complete capability boundary.
+Treat the dynamic embodied tools as the complete robot-control boundary.
 """
 
 
@@ -79,17 +89,30 @@ def operator_prompt(
     task_name: str,
     *,
     pre_move: bool,
+    icl_condition: ICLCondition | str = "none",
     max_output_tokens: int | None = None,
+    interaction_mode: str = "single_turn",
 ) -> str:
+    if isinstance(icl_condition, str):
+        icl_condition = get_icl_condition(icl_condition)
     task = get_benchmark_task(task_name)
+    if interaction_mode not in {"single_turn", "action_per_turn"}:
+        raise ValueError(f"Unsupported interaction mode: {interaction_mode!r}")
     prompt = (
         f"Task: {task.name}\n\n"
         f"{task.instruction_for(pre_move=pre_move)}\n\n"
         "Execute exactly one episode. Begin with start_episode, operate only "
         "through step_eef, and call finish_episode when you judge the best "
-        "attainable terminal state has been reached. Do not end the turn while "
-        "the episode is active. Never use knowledge from prior runs.\n"
+        "attainable terminal state has been reached. Use only information made "
+        "available in this run.\n"
     )
+    if interaction_mode == "single_turn":
+        prompt += "Do not end the turn while the episode is active.\n"
+    if icl_condition.fixed_demo_available:
+        prompt += (
+            "\nA verified successful demonstration is available at "
+            "benchmark_inputs/expert_demo/.\n"
+        )
     if max_output_tokens is not None:
         prompt += (
             "\nYour episode-wide budget is "
@@ -121,6 +144,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--provide-bbox", action="store_true")
     parser.add_argument("--provide-mask", action="store_true")
     parser.add_argument(
+        "--icl",
+        default="none",
+        choices=tuple(condition.name for condition in list_icl_conditions()),
+    )
+    parser.add_argument(
+        "--fixed-demo-root",
+        type=Path,
+        help=(
+            "Host-side P6 master root for --icl fixed_demo; defaults to "
+            "UNIVTAC_FIXED_EXPERT_MASTER_ROOT"
+        ),
+    )
+    parser.add_argument(
         "--pre-move",
         action="store_true",
         help="Use the legacy pregrasped initial state; default is ungrasped.",
@@ -129,6 +165,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--model", default=None)
     parser.add_argument("--effort", default="high")
+    parser.add_argument(
+        "--interaction-mode",
+        choices=("single_turn", "action_per_turn"),
+        default="single_turn",
+        help=(
+            "single_turn returns observations inside dynamic-tool results; "
+            "action_per_turn keeps one Codex thread but delivers each resulting "
+            "observation as the next top-level multimodal turn"
+        ),
+    )
     parser.add_argument(
         "--max-output-tokens",
         type=positive_integer,
@@ -140,6 +186,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--codex-bin", default="codex")
     parser.add_argument("--auth-home", type=Path, default=None)
+    parser.add_argument(
+        "--codex-sandbox",
+        choices=("read-only", "workspace-write", "danger-full-access"),
+        default="workspace-write",
+        help="Evaluator-controlled Codex sandbox; benchmark workspace stays temporary.",
+    )
+    parser.add_argument(
+        "--codex-network-access",
+        action="store_true",
+        help="Allow network access for general Codex tools and record that condition.",
+    )
     parser.add_argument("--timeout-seconds", type=float, default=3600.0)
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
@@ -151,11 +208,16 @@ def resolve_run_dir(
     profile: int,
     *,
     pre_move: bool,
+    icl_condition: str = "none",
 ) -> Path:
     if value is None:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         condition = "pregrasped" if pre_move else "ungrasped"
-        return REPO_ROOT / "agent_runs" / f"codex_{task}_p{profile}_{condition}_{stamp}"
+        return (
+            REPO_ROOT
+            / "agent_runs"
+            / f"codex_{task}_p{profile}_{condition}_{icl_condition}_{stamp}"
+        )
     return value.resolve() if value.is_absolute() else (REPO_ROOT / value).resolve()
 
 
@@ -207,28 +269,98 @@ def git_revision() -> dict[str, Any]:
     return {"commit": revision, "working_tree_dirty": dirty}
 
 
+def codex_sandbox_policy(
+    mode: str,
+    *,
+    workspace: Path,
+    network_access: bool,
+) -> dict[str, Any]:
+    if mode == "read-only":
+        return {"type": "readOnly", "networkAccess": network_access}
+    if mode == "workspace-write":
+        return {
+            "type": "workspaceWrite",
+            "writableRoots": [str(workspace.resolve())],
+            "networkAccess": network_access,
+        }
+    if mode == "danger-full-access":
+        return {"type": "dangerFullAccess"}
+    raise ValueError(f"Unsupported Codex sandbox mode: {mode!r}")
+
+
+def effective_codex_network_access(mode: str, requested: bool) -> bool:
+    """Return what the selected Codex sandbox policy itself permits."""
+
+    if mode == "danger-full-access":
+        return True
+    if mode in {"read-only", "workspace-write"}:
+        return bool(requested)
+    raise ValueError(f"Unsupported Codex sandbox mode: {mode!r}")
+
+
+def validate_fixed_demo_evaluation_seed(
+    *,
+    task_name: str,
+    icl_condition: ICLCondition,
+    environ: Mapping[str, str],
+) -> None:
+    """Reject an explicitly selected evaluation seed reused by the demo."""
+
+    if not icl_condition.fixed_demo_available:
+        return
+    raw_seed = environ.get(EVALUATOR_SEED_ENV)
+    if raw_seed is None or not raw_seed.isdecimal():
+        return
+    if int(raw_seed) == get_fixed_demo_asset_spec(task_name).seed:
+        raise ValueError(
+            "fixed_demo evaluation seed must differ from the registered "
+            "demonstration seed"
+        )
+
+
 def main() -> int:
     run_started = time.monotonic()
     args = parse_args()
     task = get_benchmark_task(args.task)
     profile = get_observation_profile(args.profile)
     annotations = AnnotationCapabilities(args.provide_bbox, args.provide_mask)
+    icl_condition = get_icl_condition(args.icl)
+    if icl_condition.fixed_demo_available and args.pre_move:
+        raise ValueError("fixed_demo is an ungrasped demonstration and cannot use --pre-move")
+    if not icl_condition.fixed_demo_available and args.fixed_demo_root is not None:
+        raise ValueError("--fixed-demo-root is valid only with --icl fixed_demo")
+    network_access = effective_codex_network_access(
+        args.codex_sandbox,
+        args.codex_network_access,
+    )
     budget_contract = token_budget_manifest(args.max_output_tokens)
     capabilities = benchmark_capability_manifest(
         task,
         profile,
         annotations,
         pre_move=args.pre_move,
+        icl_condition=icl_condition,
     )
     if args.dry_run:
         print(json.dumps(capabilities, ensure_ascii=False, indent=2))
         return 0
+    validate_fixed_demo_evaluation_seed(
+        task_name=task.name,
+        icl_condition=icl_condition,
+        environ=os.environ,
+    )
+    fixed_demo_root = (
+        resolve_fixed_demo_root(args.fixed_demo_root)
+        if icl_condition.fixed_demo_available
+        else None
+    )
 
     run_dir = resolve_run_dir(
         args.run_dir,
         task.name,
         profile.index,
         pre_move=args.pre_move,
+        icl_condition=icl_condition.name,
     )
     if run_dir.exists():
         raise FileExistsError(f"Run directory already exists: {run_dir}")
@@ -252,6 +384,15 @@ def main() -> int:
         "profile": profile.name,
         "profile_index": profile.index,
         "annotations": annotations.to_manifest(),
+        "icl": icl_condition.to_manifest(),
+        "interaction_mode": args.interaction_mode,
+        "codex_runtime_policy": {
+            "general_capabilities_enabled": True,
+            "sandbox": args.codex_sandbox,
+            "network_access_requested": bool(args.codex_network_access),
+            "network_access_permitted_by_codex_sandbox": network_access,
+            "configuration_source": "evaluator Codex configuration",
+        },
         "inference_budget": budget_contract,
         "run_dir": str(run_dir),
         "valid_for_scoring": False,
@@ -294,17 +435,12 @@ def main() -> int:
             raise RuntimeError("Simulator start condition disagrees with the host registry")
 
         recorder = EventRecorder(run_dir)
-        gateway = BenchmarkCapabilityGateway(
-            task=task,
-            profile=profile,
-            annotations=annotations,
-            simulator_request=simulator.request,
-            simulator_run_dir=run_dir,
-        )
         prompt = operator_prompt(
             task.name,
             pre_move=args.pre_move,
+            icl_condition=icl_condition,
             max_output_tokens=args.max_output_tokens,
+            interaction_mode=args.interaction_mode,
         )
         (run_dir / "codex_operator_prompt.txt").write_text(prompt, encoding="utf-8")
         (run_dir / "codex_base_instructions.txt").write_text(
@@ -315,8 +451,53 @@ def main() -> int:
         )
         write_json(run_dir / "codex_capabilities.json", capabilities)
 
-        with IsolatedCodexEnvironment(args.auth_home) as isolated:
-            app_server_command = embodied_codex_command(args.codex_bin)
+        with IsolatedCodexEnvironment(
+            args.auth_home,
+            inherit_agent_configuration=True,
+        ) as isolated:
+            icl_projection_receipt: dict[str, Any] | None = None
+            if icl_condition.fixed_demo_available:
+                if fixed_demo_root is None:
+                    raise RuntimeError("fixed_demo master root was not resolved")
+                icl_projection_receipt = project_fixed_demo_bundle(
+                    asset_root=fixed_demo_root,
+                    destination=(
+                        isolated.workspace / "benchmark_inputs" / "expert_demo"
+                    ),
+                    task=task.name,
+                    profile=profile,
+                    annotations=annotations,
+                )
+                write_json(
+                    run_dir / "icl_projection_receipt.json",
+                    icl_projection_receipt,
+                )
+                result["icl_bundle"] = {
+                    "manifest_sha256": icl_projection_receipt["agent_bundle"][
+                        "manifest_sha256"
+                    ],
+                    "content_integrity": icl_projection_receipt["agent_bundle"][
+                        "content_integrity"
+                    ],
+                }
+            gateway = BenchmarkCapabilityGateway(
+                task=task,
+                profile=profile,
+                annotations=annotations,
+                simulator_request=simulator.request,
+                simulator_run_dir=run_dir,
+                icl_condition=icl_condition,
+                agent_workspace=isolated.workspace,
+            )
+            app_server_command = embodied_codex_command(
+                args.codex_bin,
+                enable_general_capabilities=True,
+            )
+            sandbox_policy = codex_sandbox_policy(
+                args.codex_sandbox,
+                workspace=isolated.workspace,
+                network_access=network_access,
+            )
             manifest = {
                 "schema_version": "univtac.embodied_codex_rollout_manifest.v1",
                 "created_utc": utc_now(),
@@ -325,10 +506,33 @@ def main() -> int:
                 "pre_move_enabled": bool(args.pre_move),
                 "observation_profile": profile.to_manifest(),
                 "annotations": annotations.to_manifest(),
+                "icl": icl_condition.to_manifest(),
+                "icl_projection_receipt_file": (
+                    "icl_projection_receipt.json"
+                    if icl_projection_receipt is not None
+                    else None
+                ),
+                "icl_bundle_manifest_sha256": (
+                    icl_projection_receipt["agent_bundle"]["manifest_sha256"]
+                    if icl_projection_receipt is not None
+                    else None
+                ),
                 "requested_model": args.model,
                 "model": args.model or "Codex configured default",
                 "effort": args.effort,
                 "reasoning_summary": "detailed",
+                "interaction": {
+                    "mode": args.interaction_mode,
+                    "codex_thread_count": 1,
+                    "observation_delivery": (
+                        "next_turn_top_level_multimodal"
+                        if args.interaction_mode == "action_per_turn"
+                        else "same_turn_dynamic_tool_result"
+                    ),
+                    "embodied_actions_per_turn": (
+                        1 if args.interaction_mode == "action_per_turn" else None
+                    ),
+                },
                 "inference_budget": budget_contract,
                 "codex_version": command_version(args.codex_bin),
                 "app_server_command": app_server_command,
@@ -343,15 +547,27 @@ def main() -> int:
                 "simulator_ready_commitment": ready.get("seed_commitment_sha256"),
                 "source": git_revision(),
                 "isolation": isolated.manifest(),
+                "runtime_capabilities": {
+                    "general_codex_capabilities_enabled": True,
+                    "configuration_inherited_from_evaluator": True,
+                    "workspace": "fresh temporary workspace",
+                    "sandbox": args.codex_sandbox,
+                    "network_access_requested": bool(args.codex_network_access),
+                    "network_access_permitted_by_codex_sandbox": network_access,
+                    "policy_owner": "evaluator",
+                },
                 "enforcement": {
                     "dynamic_tool_allowlist": True,
-                    "exact_agent_tools": ["start_episode", "step_eef", "finish_episode"],
+                    "exact_robot_control_tools": [
+                        "start_episode",
+                        "step_eef",
+                        "finish_episode",
+                    ],
                     "host_side_tool_validation": True,
                     "simulator_side_command_validation": True,
                     "task_success_terminal_only": True,
                     "raw_instance_metadata_host_only": True,
-                    "codex_read_only_sandbox": True,
-                    "codex_network_access": False,
+                    "general_codex_items_are_capability_violations": False,
                     "max_consecutive_rejected_tool_calls": (
                         gateway.MAX_CONSECUTIVE_REJECTED_CALLS
                     ),
@@ -376,6 +592,7 @@ def main() -> int:
                 recorder=recorder,
                 stderr_path=run_dir / "codex_app_server_stderr.log",
                 timeout_seconds=args.timeout_seconds,
+                enforce_embodied_only=False,
             )
             codex.initialize()
             codex.start_thread(
@@ -383,22 +600,69 @@ def main() -> int:
                 model=args.model,
                 base_instructions=BASE_INSTRUCTIONS,
                 developer_instructions=DEVELOPER_INSTRUCTIONS,
+                sandbox=args.codex_sandbox,
             )
-            turn = codex.run_turn(
-                gateway=gateway,
-                prompt=prompt,
-                model=args.model,
-                effort=args.effort,
-                reasoning_summary="detailed",
-                task_name=task.name,
-                profile_name=profile.name,
-            )
+            turn_summaries: list[dict[str, Any]] = []
+            next_prompt: str | None = prompt
+            next_input_items: list[dict[str, Any]] | None = None
+            while True:
+                turn = codex.run_turn(
+                    gateway=gateway,
+                    prompt=next_prompt,
+                    input_items=next_input_items,
+                    model=args.model,
+                    effort=args.effort,
+                    reasoning_summary="detailed",
+                    task_name=task.name,
+                    profile_name=profile.name,
+                    sandbox_policy=sandbox_policy,
+                    interrupt_after_dynamic_tool=(
+                        args.interaction_mode == "action_per_turn"
+                    ),
+                    defer_dynamic_tool_content=(
+                        args.interaction_mode == "action_per_turn"
+                    ),
+                )
+                turn_summaries.append(
+                    {
+                        "index": len(turn_summaries),
+                        "turn_id": turn["turn_id"],
+                        "status": (
+                            turn["turn"].get("status")
+                            if isinstance(turn.get("turn"), dict)
+                            else None
+                        ),
+                        "dynamic_tool_call_count": turn[
+                            "dynamic_tool_call_count"
+                        ],
+                        "last_dynamic_tool": turn["last_dynamic_tool"],
+                        "interrupted_after_dynamic_tool": turn[
+                            "interrupted_after_dynamic_tool"
+                        ],
+                    }
+                )
+                if args.interaction_mode == "single_turn" or gateway.terminal:
+                    break
+                if turn["dynamic_tool_call_count"] != 1:
+                    raise RuntimeError(
+                        "action_per_turn requires exactly one embodied tool call "
+                        "before each nonterminal turn boundary"
+                    )
+                deferred = turn.get("deferred_input_items")
+                if not isinstance(deferred, list) or not deferred:
+                    raise RuntimeError(
+                        "action_per_turn did not produce a public follow-up observation"
+                    )
+                next_prompt = None
+                next_input_items = deferred
             result.update(
                 {
-                    "status": "codex_turn_completed",
+                    "status": "codex_interaction_completed",
                     "thread_id": turn["thread_id"],
                     "turn_id": turn["turn_id"],
                     "turn": turn["turn"],
+                    "turn_count": len(turn_summaries),
+                    "turns": turn_summaries,
                     "episode_terminal": gateway.terminal,
                     "capability_violation": codex.capability_violation,
                 }
@@ -412,7 +676,10 @@ def main() -> int:
                     }
                 )
                 simulator.wait(timeout_seconds=120.0)
-            event_audit = audit_codex_events(recorder.raw_path)
+            event_audit = audit_codex_events(
+                recorder.raw_path,
+                enforce_embodied_only=False,
+            )
             result.update(
                 {
                     "event_audit": event_audit,
@@ -456,7 +723,10 @@ def main() -> int:
                 temporary_log.replace(run_dir / "simulator_stdout.log")
             runtime_summary = None
             if recorder is not None:
-                event_audit = audit_codex_events(recorder.raw_path)
+                event_audit = audit_codex_events(
+                    recorder.raw_path,
+                    enforce_embodied_only=False,
+                )
                 runtime_summary = summarize_codex_runtime(recorder.raw_path)
                 budget_check = check_token_budget(
                     runtime_summary,

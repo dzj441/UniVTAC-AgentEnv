@@ -185,6 +185,150 @@ for _ in sys.stdin:
 '''
 
 
+FAKE_GENERAL_SERVER = r'''#!/usr/bin/env python3
+import json
+import sys
+
+def receive():
+    line = sys.stdin.readline()
+    if not line:
+        raise SystemExit(0)
+    return json.loads(line)
+
+def send(payload):
+    print(json.dumps(payload), flush=True)
+
+initialize = receive()
+send({"id": initialize["id"], "result": {"userAgent": "fake-general"}})
+assert receive()["method"] == "initialized"
+thread = receive()
+assert thread["method"] == "thread/start"
+assert "environments" not in thread["params"]
+assert thread["params"]["sandbox"] == "workspace-write"
+send({"id": thread["id"], "result": {"thread": {"id": "thread-general"}}})
+turn = receive()
+assert turn["method"] == "turn/start"
+assert "environments" not in turn["params"]
+assert turn["params"]["sandboxPolicy"] == {
+    "type": "workspaceWrite", "writableRoots": [turn["params"]["cwd"]],
+    "networkAccess": True,
+}
+send({"id": turn["id"], "result": {
+    "turn": {"id": "turn-general", "status": "inProgress", "items": []},
+}})
+send({"method": "item/completed", "params": {
+    "threadId": "thread-general", "turnId": "turn-general",
+    "item": {"id": "command-1", "type": "commandExecution"},
+}})
+send({"method": "turn/completed", "params": {
+    "threadId": "thread-general",
+    "turn": {"id": "turn-general", "status": "completed", "items": []},
+}})
+for _ in sys.stdin:
+    pass
+'''
+
+
+FAKE_MULTI_TURN_SERVER = r'''#!/usr/bin/env python3
+import json
+import sys
+
+def receive():
+    line = sys.stdin.readline()
+    if not line:
+        raise SystemExit(0)
+    return json.loads(line)
+
+def send(payload):
+    print(json.dumps(payload), flush=True)
+
+initialize = receive()
+send({"id": initialize["id"], "result": {"userAgent": "fake-multi-turn"}})
+assert receive()["method"] == "initialized"
+thread = receive()
+assert thread["method"] == "thread/start"
+send({"id": thread["id"], "result": {"thread": {"id": "thread-multi"}}})
+
+turn_one = receive()
+assert turn_one["method"] == "turn/start"
+assert turn_one["params"]["threadId"] == "thread-multi"
+assert turn_one["params"]["input"] == [
+    {"type": "text", "text": "Start the episode only."}
+]
+send({"id": turn_one["id"], "result": {
+    "turn": {"id": "turn-one", "status": "inProgress", "items": []},
+}})
+send({"id": 101, "method": "item/tool/call", "params": {
+    "threadId": "thread-multi", "turnId": "turn-one", "callId": "call-start",
+    "tool": "start_episode", "arguments": {"agent_note": "multi-turn test"},
+}})
+start_result = receive()
+assert start_result["id"] == 101 and start_result["result"]["success"]
+assert json.loads(start_result["result"]["contentItems"][0]["text"]) == {
+    "status": "result_deferred_to_next_turn",
+    "tool": "start_episode",
+    "success": True,
+}
+interrupt_one = receive()
+assert interrupt_one["method"] == "turn/interrupt"
+send({"id": interrupt_one["id"], "result": {}})
+send({"method": "turn/completed", "params": {
+    "threadId": "thread-multi",
+    "turn": {"id": "turn-one", "status": "interrupted", "items": []},
+}})
+
+turn_two = receive()
+assert turn_two["method"] == "turn/start"
+assert turn_two["params"]["threadId"] == "thread-multi"
+followup = turn_two["params"]["input"]
+assert len(followup) == 5
+assert json.loads(followup[0]["text"])["observation"]["observation_id"] == "obs_000"
+assert [item["type"] for item in followup] == [
+    "text", "text", "image", "text", "image",
+]
+assert all(
+    item["url"].startswith("data:image/png;base64,") and item["detail"] == "auto"
+    for item in (followup[2], followup[4])
+)
+send({"id": turn_two["id"], "result": {
+    "turn": {"id": "turn-two", "status": "inProgress", "items": []},
+}})
+send({"id": 102, "method": "item/tool/call", "params": {
+    "threadId": "thread-multi", "turnId": "turn-two", "callId": "call-commit",
+    "tool": "commit_classification", "arguments": {
+        "observation_id": "obs_000", "predicted_class": "plain",
+        "target_pad": "green", "decision_record": {
+            "evidence": [{
+                "source": "head_rgb", "finding": "The face appears uniform.",
+                "implication": "The plain class is more likely."
+            }],
+            "alternatives_considered": ["Probe, but visual evidence is sufficient."],
+            "uncertainty": 0.2,
+            "expected_effect": "Commitment unlocks bounded control.",
+            "parameter_rationale": "There is no continuous motion magnitude.",
+            "rationale": "Commit plain from public RGB."
+        },
+    },
+}})
+commit_result = receive()
+assert commit_result["id"] == 102 and commit_result["result"]["success"]
+assert json.loads(commit_result["result"]["contentItems"][0]["text"]) == {
+    "status": "result_deferred_to_next_turn",
+    "tool": "commit_classification",
+    "success": True,
+}
+interrupt_two = receive()
+assert interrupt_two["method"] == "turn/interrupt"
+send({"id": interrupt_two["id"], "result": {}})
+send({"method": "turn/completed", "params": {
+    "threadId": "thread-multi",
+    "turn": {"id": "turn-two", "status": "interrupted", "items": []},
+}})
+for _ in sys.stdin:
+    pass
+'''
+
+
 def test_app_server_loop_records_dynamic_tools_decisions_and_messages(
     tmp_path: Path,
 ) -> None:
@@ -259,3 +403,116 @@ def test_app_server_loop_records_dynamic_tools_decisions_and_messages(
         "agent_message",
     }
     assert audit_codex_events(recorder.raw_path)["passed"] is True
+
+
+def test_general_app_server_mode_inherits_environments_and_accepts_general_items(
+    tmp_path: Path,
+) -> None:
+    server_path = tmp_path / "fake_general_app_server.py"
+    server_path.write_text(FAKE_GENERAL_SERVER, encoding="utf-8")
+    recorder = EventRecorder(tmp_path)
+    gateway = CapabilityGateway(
+        level=1,
+        simulator_request=TerminalSimulator(tmp_path),
+        simulator_run_dir=tmp_path,
+    )
+    client = CodexAppServerClient(
+        [sys.executable, str(server_path)],
+        cwd=tmp_path,
+        recorder=recorder,
+        stderr_path=tmp_path / "stderr.log",
+        timeout_seconds=10,
+        enforce_embodied_only=False,
+    )
+    try:
+        client.initialize()
+        client.start_thread(
+            gateway=gateway,
+            model=None,
+            base_instructions="Use public inputs.",
+            developer_instructions="Use dynamic tools for robot control.",
+            sandbox="workspace-write",
+        )
+        result = client.run_turn(
+            gateway=gateway,
+            prompt="Inspect the public workspace.",
+            model=None,
+            effort="high",
+            sandbox_policy={
+                "type": "workspaceWrite",
+                "writableRoots": [str(tmp_path.resolve())],
+                "networkAccess": True,
+            },
+        )
+    finally:
+        client.close()
+
+    assert result["capability_violation"] is False
+    assert audit_codex_events(
+        recorder.raw_path,
+        enforce_embodied_only=False,
+    )["passed"] is True
+
+
+def test_same_thread_accepts_multimodal_followup_turn_and_interrupts_after_tool(
+    tmp_path: Path,
+) -> None:
+    server_path = tmp_path / "fake_multi_turn_app_server.py"
+    server_path.write_text(FAKE_MULTI_TURN_SERVER, encoding="utf-8")
+    recorder = EventRecorder(tmp_path)
+    simulator = TerminalSimulator(tmp_path)
+    gateway = CapabilityGateway(
+        level=1,
+        simulator_request=simulator,
+        simulator_run_dir=tmp_path,
+    )
+    client = CodexAppServerClient(
+        [sys.executable, str(server_path)],
+        cwd=tmp_path,
+        recorder=recorder,
+        stderr_path=tmp_path / "stderr.log",
+        timeout_seconds=10,
+    )
+    try:
+        client.initialize()
+        client.start_thread(
+            gateway=gateway,
+            model=None,
+            base_instructions="Use only dynamic tools.",
+            developer_instructions="One embodied action per turn.",
+        )
+        first = client.run_turn(
+            gateway=gateway,
+            prompt="Start the episode only.",
+            model=None,
+            effort="high",
+            interrupt_after_dynamic_tool=True,
+            defer_dynamic_tool_content=True,
+        )
+        second = client.run_turn(
+            gateway=gateway,
+            prompt=None,
+            input_items=first["deferred_input_items"],
+            model=None,
+            effort="high",
+            interrupt_after_dynamic_tool=True,
+            defer_dynamic_tool_content=True,
+        )
+    finally:
+        client.close()
+
+    assert first["thread_id"] == second["thread_id"] == "thread-multi"
+    assert first["turn_id"] == "turn-one"
+    assert second["turn_id"] == "turn-two"
+    assert first["dynamic_tool_call_count"] == 1
+    assert second["dynamic_tool_call_count"] == 1
+    assert first["last_dynamic_tool"] == "start_episode"
+    assert second["last_dynamic_tool"] == "commit_classification"
+    assert len(first["deferred_input_items"]) == 5
+    assert second["deferred_input_items"][0]["type"] == "text"
+    assert first["interrupted_after_dynamic_tool"] is True
+    assert second["interrupted_after_dynamic_tool"] is True
+    assert [call["command"] for call in simulator.calls] == [
+        "start",
+        "submit_prediction",
+    ]

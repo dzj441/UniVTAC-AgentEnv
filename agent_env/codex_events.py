@@ -141,8 +141,12 @@ def _redact_credentials(value: Any, *, key: str = "") -> Any:
     return value
 
 
-def audit_codex_events(raw_path: Path) -> dict[str, Any]:
-    """Classify agent behavior that lies outside an embodied-only rollout."""
+def audit_codex_events(
+    raw_path: Path,
+    *,
+    enforce_embodied_only: bool = True,
+) -> dict[str, Any]:
+    """Verify event integrity and optionally enforce the legacy tool boundary."""
 
     allowed_item_types = {
         "userMessage",
@@ -225,12 +229,13 @@ def audit_codex_events(raw_path: Path) -> dict[str, Any]:
         method = message.get("method")
         if isinstance(method, str):
             event_counts[method] = event_counts.get(method, 0) + 1
-            if method in forbidden_methods:
+            if enforce_embodied_only and method in forbidden_methods:
                 violations.append(
                     {"line": line_number, "reason": "forbidden_method", "method": method}
                 )
             elif (
-                record.get("direction") == "server_to_host"
+                enforce_embodied_only
+                and record.get("direction") == "server_to_host"
                 and "id" in message
                 and method != "item/tool/call"
             ):
@@ -243,7 +248,11 @@ def audit_codex_events(raw_path: Path) -> dict[str, Any]:
                 )
         params = message.get("params")
         item = params.get("item") if isinstance(params, dict) else None
-        if isinstance(item, dict) and item.get("type") in forbidden_item_types:
+        if (
+            enforce_embodied_only
+            and isinstance(item, dict)
+            and item.get("type") in forbidden_item_types
+        ):
             violations.append(
                 {
                     "line": line_number,
@@ -252,7 +261,11 @@ def audit_codex_events(raw_path: Path) -> dict[str, Any]:
                     "item_id": item.get("id"),
                 }
             )
-        elif isinstance(item, dict) and item.get("type") not in allowed_item_types:
+        elif (
+            enforce_embodied_only
+            and isinstance(item, dict)
+            and item.get("type") not in allowed_item_types
+        ):
             violations.append(
                 {
                     "line": line_number,
@@ -267,6 +280,7 @@ def audit_codex_events(raw_path: Path) -> dict[str, Any]:
         "event_counts": event_counts,
         "event_count": expected_sequence,
         "terminal_chain_sha256": expected_previous,
+        "embodied_only_policy_enforced": enforce_embodied_only,
     }
 
 
@@ -343,7 +357,7 @@ def token_budget_manifest(max_output_tokens: int | None) -> dict[str, Any]:
         "metric": "codex_app_server.token_usage.total.outputTokens",
         "max_output_tokens": max_output_tokens,
         "enforcement": "posthoc_terminal_checker",
-        "scope": "single episode / single Codex thread and turn",
+        "scope": "single episode / single Codex thread",
         "disclosed_to_agent": max_output_tokens is not None,
         "reasoning_output_tokens_are_subset": True,
     }

@@ -3,6 +3,14 @@
 This document describes the boundary between Codex, the benchmark host, and the
 Isaac/TacEx simulator for `grasp_classify`.
 
+This is the legacy v0 runner contract. Its embodied-only capability boundary
+is intentionally preserved for compatibility. The generic v1 task runner uses
+a fresh temporary workspace while inheriting evaluator-configured Codex
+capabilities and keeps only robot control behind the three dynamic tools; see
+[`EmbodiedBenchmarkV1.md`](EmbodiedBenchmarkV1.md). Statements below about
+disabling shell, files, network, plugins, skills, or subagents apply only to
+`scripts/run_codex_agent_env.py`, not `scripts/run_codex_benchmark.py`.
+
 ## Why this boundary exists
 
 A prompt saying “do not inspect the simulator” is not an evaluation boundary.

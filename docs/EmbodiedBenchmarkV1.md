@@ -4,6 +4,7 @@ v1 是当前通用 benchmark 接口。它把“Agent 能看到什么”与“Age
 
 - 六个 Observation Profile 是主榜能力轴；
 - 匿名 BBox 与 Mask 是两个可独立开关的诊断轴；
+- `icl=none|fixed_demo` 是独立的固定示范诊断轴；
 - 所有条件共享同一个世界坐标系 EEF 动作接口；
 - 控制过程中不返回 reward 或 task success；
 - `finish_episode` 后才执行终局评测并公开 success。
@@ -44,15 +45,33 @@ none
 --provide-bbox --provide-mask
 ```
 
-每个公开相机按需返回两个匿名角色：
+`start_episode` 返回的首帧 `obs_000` 中，每个 Profile 公开的相机按需返回两个匿名角色：
 
 - `manipulated_object`
 - `goal_fixture`
 
 BBox 使用 `[x1, y1, x2, y2]`、右下角 exclusive 的像素坐标；Mask 是同分辨率二值
-PNG。物体不在当前视野时会返回 `visible=false`、空 BBox/Mask，而不会伪造位置。
+PNG。物体不在首帧视野时会返回 `visible=false`、空 BBox/Mask，而不会伪造位置。
+`obs_001` 及之后不再返回 annotation 字段、坐标、Mask 或 overlay；固定示范同样只在
+`frame_000000` 中提供。这一 `initial_observation_only` 规则让后续跟踪仍由 Agent 完成。
 Isaac 的 raw instance ID、label、actor 名和 USD prim path 只在 host 内存中用于映射，
 终局前不会写入公开记录。SAM 3/UniDepth V2 不参与该 oracle 轴。
+
+## 固定专家 ICL 诊断轴
+
+`--icl none` 不创建、不提示任何专家资产。`--icl fixed_demo` 则在 Agent 启动前，把当前
+任务已验证的 P6 master 按本次 `Profile × BBox × Mask` 条件投影到临时 workspace 的
+`benchmark_inputs/expert_demo/`。原始 HDF5、P6 host manifest、seed 与 checker 证明不会
+进入 Agent workspace。
+
+专家轨迹公开的是采样到的状态/EEF waypoint，不是不存在的 `step_eef` 调用记录；因此
+`trajectory.jsonl` 明确使用 `observed_expert_waypoint`，不提供或伪造动作 delta。整条示范
+只公开一次 episode 级的 `successful expert demonstration`，不公开逐步 success、首次成功
+时刻或 checker 细节。BBox/Mask 依然只出现在专家首帧。
+
+固定示范是 ungrasped 条件，因此 runner 拒绝 `--icl fixed_demo --pre-move`。完整静态数据
+格式、投影规则和验证命令见
+[`PublicObservationAndICLDataContract.md`](PublicObservationAndICLDataContract.md)。
 
 ## 任务
 
@@ -127,16 +146,57 @@ schema 中。
   --profile 6 \
   --provide-bbox \
   --provide-mask \
+  --icl fixed_demo \
   --dry-run
 ```
 
-Codex runner 同样默认使用 ungrasped；只有显式 `--pre-move` 才运行旧初始化。
+Dry-run 不读取大型专家资产，只展示将采用的 Profile、annotation、ICL 和机器人工具契约。
+Codex runner 默认使用 ungrasped；只有 `icl=none` 时才允许显式 `--pre-move`。
 
-正式执行时移除 `--dry-run` 并指定新的 `--run-dir`。Runner 使用临时空 workspace 与
-临时 `CODEX_HOME`，只复制认证文件；Codex 是单一连续 thread/turn，在一次 turn 中完成
-多轮 observation + action。它没有 shell、文件、网络、MCP/app、skill、subagent、IK、
-planner 或 simulator code 能力。所有已发布 reasoning summary、显式 decision record、
-tool call、环境响应和图像都落盘，隐藏 chain-of-thought 不在 Codex 协议中公开。
+正式执行时移除 `--dry-run`、指定新的 `--run-dir`，并通过参数或 evaluator-private 环境
+变量定位固定示范 master：
+
+```bash
+UNIVTAC_FIXED_EXPERT_MASTER_ROOT=/path/to/expert_observation_master \
+../miniconda3/envs/UniVTAC/bin/python scripts/run_codex_benchmark.py \
+  --task pull_out_key --profile 6 \
+  --provide-bbox --provide-mask \
+  --icl fixed_demo \
+  --interaction-mode action_per_turn \
+  --codex-sandbox workspace-write \
+  --run-dir agent_runs/pull_key_p6_fixed_demo
+```
+
+Generic v1 runner 为每次 rollout 创建干净的临时 workspace，但继承评测方的正常
+`CODEX_HOME` 配置，也不再通过启动参数禁用 shell、文件、`view_image`、MCP/app、skill、
+subagent 等通用能力。Sandbox 与网络策略由 `--codex-sandbox` 和
+`--codex-network-access` 选择并写入 manifest；Benchmark core 不把通用工具使用判为
+capability violation。`danger-full-access` 本身不施加 Codex 网络 sandbox，因此 manifest
+会把其有效网络权限记为允许，即使未额外给出网络开关。机器人控制仍只能经过
+`start_episode`、`step_eef`、`finish_episode` 三个 host 校验的 dynamic tools，通用工具
+不会获得第二条仿真控制通路。
+
+在线 RGB、触觉、depth preview 与首帧 annotation overlay 由 Agent transport 主动发送。
+无法作为 image content 传输的米制 `.npy` depth 与 raw mask 只发布到
+`benchmark_inputs/current_observation/`，每个新 observation 原子替换前一帧，不提供自动
+历史。完整在线轨迹仍仅保存在 evaluator-private run directory；Agent 如需历史应自行保存。
+
+Codex 在整个 episode 中始终使用一个连续 thread。Runner 支持两种显式记录在 manifest
+中的传输模式：
+
+- `single_turn`：保持旧行为，observation 作为 dynamic-tool result 返回，模型可在同一
+  turn 中继续调用下一个机器人动作；
+- `action_per_turn`：每个非终局机器人调用后结束当前 turn，并把该调用产生的完整公开
+  JSON + images 作为同一 thread 的下一个顶层 multimodal turn 输入。Tool result 只返回
+  非策略性的 deferred acknowledgement；`finish_episode` 的终局结果仍在最后一个 turn
+  中直接返回。
+
+`action_per_turn` 不创建新 session、thread 或 simulator episode，也不改变 50-step 动作
+预算；它只把 observation/action 的环境边界映射为自然的对话 turn 边界。每个 turn 在
+机器人动作前仍可使用 evaluator 允许的 shell、图片、MCP 等通用能力。所有已发布
+reasoning summary、显式 decision record、tool call、环境响应和图像都落盘，隐藏
+chain-of-thought 不在 Codex 协议中公开。旧 v0 `grasp_classify` runner 仍保持自身的严格
+隔离策略，见 [`CodexAgentRunner.md`](CodexAgentRunner.md)。
 
 ## 推理 Token 预算
 
@@ -150,7 +210,7 @@ Codex runner 可选配置单 episode 的累计输出 token 上限：
   --run-dir agent_runs/example_pull_key_budgeted
 ```
 
-当前实现是 `posthoc_terminal_checker`：完整 turn 结束后读取 App Server 最后一次
+当前实现是 `posthoc_terminal_checker`：完整 episode/thread 结束后读取 App Server 最后一次
 `thread/tokenUsage/updated` 的累计 `total.outputTokens` 并与上限比较。该字段已经包含
 `reasoningOutputTokens`，二者不会相加重复计数；等于上限仍算通过。配置预算后，准确数值
 会写入 operator prompt，使 Agent 在开始前知道限制。
@@ -176,6 +236,10 @@ P6 rollout 的成功轨迹分布校准，再将两个名字映射到冻结的数
 
 Codex run 还包含 `codex_app_server_events.jsonl`、`codex_messages.jsonl`、
 `codex_decisions.jsonl`、`codex_tool_calls.jsonl`、`CODEX_TRACE.md` 和 agent timeline MP4。
+`icl=fixed_demo` 时还会在 evaluator run directory 中保存
+`icl_projection_receipt.json`，用于认证所用 master 与 public bundle 哈希；该 receipt 不会
+放入 Agent workspace。运行 manifest 同时记录 ICL 条件、通用 capability 策略、sandbox、
+网络条件，以及严格固定的三项机器人控制工具。
 Base、developer 与 task/operator 三层指令分别落盘并在 manifest 中记录 SHA-256；完整
 dynamic-tool schema 单独保存在 `codex_capabilities.json`。
 这些内容可用只读 Viewer 复盘：
@@ -192,6 +256,16 @@ dynamic-tool schema 单独保存在 `codex_capabilities.json`。
 ../miniconda3/envs/UniVTAC/bin/python -m pytest -q tests/agent_env
 node --check agent_env/viewer_static/app.js
 ```
+
+两条正式专家资产的完整投影矩阵：
+
+```bash
+../miniconda3/envs/UniVTAC/bin/python scripts/validate_fixed_demo_assets.py \
+  --fixed-demo-root /path/to/expert_observation_master --summary-only
+```
+
+该命令覆盖 `2 tasks × 6 Profiles × 4 annotation conditions = 48` 组，并逐帧检查源数据与
+投影后 artifact 哈希、字段 allowlist、相对路径、initial-only annotation 和无额外文件。
 
 两任务完整 feature-smoke（真实 Isaac，依次执行）：
 

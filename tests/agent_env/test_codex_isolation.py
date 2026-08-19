@@ -50,3 +50,44 @@ def test_embodied_codex_command_disables_non_embodied_builtins() -> None:
         "plugins",
         "skill_search",
     } <= disabled
+
+
+def test_general_codex_mode_keeps_capabilities_and_isolates_workspace(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "auth.json").write_text('{"token":"test"}', encoding="utf-8")
+    (source / "config.toml").write_text("[features]\nplugins=true\n", encoding="utf-8")
+    (source / "skills").mkdir()
+    monkeypatch.setenv("UNIVTAC_EVALUATOR_SEED", "private-seed")
+    monkeypatch.setenv("UNIVTAC_FIXED_EXPERT_MASTER_ROOT", "/private/master")
+    monkeypatch.setenv("UNIVTAC_RUNTIME_SENTINEL", "kept")
+
+    isolated = IsolatedCodexEnvironment(
+        source,
+        inherit_agent_configuration=True,
+    )
+    root = isolated.root
+    try:
+        assert isolated.codex_home == source.resolve()
+        assert not any(isolated.workspace.iterdir())
+        environment = isolated.child_environment()
+        assert environment["CODEX_HOME"] == str(source.resolve())
+        assert environment["UNIVTAC_RUNTIME_SENTINEL"] == "kept"
+        assert "UNIVTAC_EVALUATOR_SEED" not in environment
+        assert "UNIVTAC_FIXED_EXPERT_MASTER_ROOT" not in environment
+        manifest = isolated.manifest()
+        assert manifest["fresh_codex_home"] is False
+        assert manifest["inherited_config"] is True
+        assert manifest["inherited_plugins"] is True
+        assert manifest["inherited_skills"] is True
+    finally:
+        isolated.close()
+    assert source.is_dir()
+    assert not root.exists()
+
+    assert embodied_codex_command(
+        "/bin/codex", enable_general_capabilities=True
+    ) == ["/bin/codex", "app-server", "--stdio"]

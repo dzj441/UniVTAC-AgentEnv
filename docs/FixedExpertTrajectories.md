@@ -155,8 +155,8 @@ and, for the bottle task, also passes release and pose-stability checks.
 The v2 P6 manifest is host-side provenance and deliberately has
 `agent_ready=false`, `actions_present=false`, and
 `step_eef_conversion_performed=false`. It may contain evaluator evidence and
-must not be handed directly to an Agent. Agent-visible demonstration
-projection is a separate future design step.
+must not be handed directly to an Agent. The implemented fixed-demo projector
+authenticates this master and creates a separate, Profile-safe Agent bundle.
 
 ## Current maximal expert observation masters
 
@@ -174,3 +174,55 @@ contain complete P6 observations at every original saved waypoint and both
 independent annotation sources at the initial waypoint only. The earlier
 `p6_master/` v1 directories are retained as immutable migration evidence but
 are superseded because they do not contain annotation sources.
+
+## Export Agent-visible fixed demonstrations
+
+The host registry pins each task to the expected v2 master manifest SHA-256.
+Projection fails closed if the registered manifest, a source observation, or
+any referenced artifact has changed. It then physically materializes only the
+requested Profile and annotation condition; disabled data has neither a field
+nor a file in the output. Absolute host paths, private seed, source manifest,
+checker evidence, raw labels, and planner internals are not copied.
+
+```bash
+FIXED_DEMO_ROOT=/path/to/expert_observation_master
+
+../miniconda3/envs/UniVTAC/bin/python scripts/export_fixed_demo.py \
+  --fixed-demo-root "${FIXED_DEMO_ROOT}" \
+  --task pull_out_key --profile 6 \
+  --provide-bbox --provide-mask \
+  --output /tmp/univtac-pull-key-demo
+```
+
+The public output uses `manifest.json`, `trajectory.jsonl`, `state.jsonl`,
+optional calibration streams, per-frame artifacts, and deterministic contact
+sheets. Its trajectory records `observed_expert_waypoint`; it never claims a
+recorded `step_eef` action. BBox/mask are independent and occur only in
+`frame_000000`.
+
+Validate every registered public projection:
+
+```bash
+../miniconda3/envs/UniVTAC/bin/python scripts/validate_fixed_demo_assets.py \
+  --fixed-demo-root "${FIXED_DEMO_ROOT}" --summary-only
+```
+
+The formal matrix contains 48 combinations: two tasks, six observation
+Profiles, and four bbox/mask conditions. The current two registered masters
+pass all 48 projections.
+
+## Select the ICL condition at runtime
+
+`scripts/run_codex_benchmark.py` exposes `--icl none|fixed_demo`. With
+`fixed_demo`, it projects the matching public bundle into
+`benchmark_inputs/expert_demo/` inside the fresh Agent workspace before the
+Codex turn. With `none`, it creates no expert bundle and gives no demo
+discoverability notice. Fixed demos are ungrasped and therefore cannot be
+combined with `--pre-move`. A non-dry fixed-demo run also rejects an explicitly
+selected same-task evaluation seed that equals the registered demonstration
+seed; normal randomly generated evaluation seeds are already disjoint.
+
+The runner saves `icl_projection_receipt.json` only in the evaluator run
+directory. It contains host-side source provenance and is not visible in the
+temporary Agent workspace. Specific Agent prompt wording is intentionally not
+frozen by this data-pipeline milestone.

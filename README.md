@@ -8,9 +8,10 @@
 ## Installation
 
 The current agentic embodied benchmark uses six observation profiles, an
-independent anonymous BBox/Mask diagnostic axis, and one bounded EEF action
-surface on `pull_out_key` and `put_bottle_in_shelf`. See
-[Embodied Benchmark v1](docs/EmbodiedBenchmarkV1.md).
+independent anonymous BBox/Mask diagnostic axis, a `none|fixed_demo` ICL axis,
+and one bounded EEF action surface on `pull_out_key` and
+`put_bottle_in_shelf`. See [Embodied Benchmark v1](docs/EmbodiedBenchmarkV1.md)
+and the [Public Observation and ICL Data Contract](docs/PublicObservationAndICLDataContract.md).
 
 For the experimental three-level, agent-facing `grasp_classify` interface, see
 [Grasp-Classify AgentEnv v0](docs/AgentEnvV0.md). The isolated Codex operator,

@@ -50,6 +50,8 @@ cd "${REPO_ROOT}"
   scripts/parallel_collect_data.py \
   scripts/replay.py \
   scripts/freeze_fixed_expert.py \
+  scripts/export_fixed_demo.py \
+  scripts/validate_fixed_demo_assets.py \
   scripts/run_codex_agent_env.py \
   scripts/run_codex_benchmark.py \
   scripts/run_agent_viewer.py \
@@ -70,6 +72,9 @@ cd "${REPO_ROOT}"
   --task put_bottle_in_shelf --profile 1 --pre-move --dry-run >/dev/null
 "${PYTHON_BIN}" scripts/run_codex_benchmark.py \
   --task pull_out_key --profile 6 --max-output-tokens 12000 --dry-run >/dev/null
+"${PYTHON_BIN}" scripts/run_codex_benchmark.py \
+  --task pull_out_key --profile 6 --provide-bbox --provide-mask \
+  --icl fixed_demo --dry-run >/dev/null
 
 if [[ "${RUN_REAL}" == true ]]; then
   "${PYTHON_BIN}" tests/agent_env/real_smoke.py --level "${LEVEL}" --device "${DEVICE}"

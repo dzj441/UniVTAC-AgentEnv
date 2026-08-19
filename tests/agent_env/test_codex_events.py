@@ -114,6 +114,34 @@ def test_event_audit_fails_closed_on_future_unknown_item(tmp_path: Path) -> None
     assert audit["violations"][0]["reason"] == "unknown_item_type_fail_closed"
 
 
+def test_event_audit_general_policy_records_tools_without_rejecting_them(
+    tmp_path: Path,
+) -> None:
+    recorder = EventRecorder(tmp_path)
+    for item_type in (
+        "commandExecution",
+        "fileChange",
+        "mcpToolCall",
+        "collabAgentToolCall",
+        "webSearch",
+        "imageView",
+        "futureEvaluatorConfiguredTool",
+    ):
+        recorder.record_raw(
+            "server_to_host",
+            {
+                "method": "item/completed",
+                "params": {"item": {"id": item_type, "type": item_type}},
+            },
+        )
+    audit = audit_codex_events(
+        recorder.raw_path,
+        enforce_embodied_only=False,
+    )
+    assert audit["passed"] is True
+    assert audit["embodied_only_policy_enforced"] is False
+
+
 def test_event_audit_fails_closed_on_future_server_request(tmp_path: Path) -> None:
     recorder = EventRecorder(tmp_path)
     recorder.record_raw(

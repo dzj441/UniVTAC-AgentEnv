@@ -1,6 +1,8 @@
 # Public Observation and ICL Data Contract v1
 
-Status: implementation contract for the UniVTAC Agentic Embodied Benchmark.
+Status: v1 contract with the static ICL projector and reference-runner
+integration implemented. Direct maximal P6 recording in the normal collection
+and replay paths remains follow-up production work.
 
 This document separates the benchmark's internal assets, the static expert
 demonstration made available to an Agent, and observations produced during a
@@ -95,6 +97,11 @@ The Agent is told only that a verified demonstration exists at
 the initial prompt. The Agent may inspect, script against, transform, or ignore
 the bundle using any capabilities available in its runtime.
 
+The bundle also contains deterministic per-modality contact sheets. The
+`uniform_endpoint_preserving_v1` rule chooses at most 12 frames and always
+keeps both endpoints. This is a browsing aid, not an additional observation:
+every tile comes from a frame already present in the projected bundle.
+
 ### Live episode observations
 
 A live observation is actively returned to the Agent and may also be recorded
@@ -137,11 +144,11 @@ namespace: `frame_000000` for a demonstration and `obs_000` for a live run.
 
 ### State
 
-In a static expert bundle, state is stored once in an append-only
+In a static expert bundle, state is stored once in an ordered
 `state.jsonl`:
 
 ```json
-{"observation_id":"frame_000003","record_index":3,"sim_step":120,"time_from_demo_start_s":2.0,"joint_position_9d":[],"joint_velocity_9d":[],"gripper_width_m":0.06,"end_effector_pose_robot_base_wxyz_7d":[]}
+{"observation_id":"frame_000003","record_index":3,"relative_sim_step":60,"joint_position_9d":[],"joint_velocity_9d":[],"gripper_width_m":0.06,"end_effector_pose_robot_base_wxyz_7d":[]}
 ```
 
 Every expert frame's `observation.json` contains a relative `state_ref` with
@@ -237,14 +244,17 @@ subsequent tracking to the Agent.
 ## Static trajectory index
 
 `trajectory.jsonl` is an index, not an action log. One record identifies the
-public frame, state record, recorded simulator timestamp, and elapsed time:
+public frame, state record, and physics-step offset from the first demonstrated
+waypoint:
 
 ```json
-{"frame_index":12,"source_sim_step":270,"time_from_demo_start_s":2.0,"observation":"frames/frame_000012/observation.json","state_record_index":12,"representation":"observed_expert_waypoint"}
+{"frame_index":12,"relative_sim_step":240,"observation":"frames/frame_000012/observation.json","state_record_index":12,"representation":"observed_expert_waypoint"}
 ```
 
 The EEF waypoint itself lives in the referenced state record. There is no
-`step_eef`, action delta, planner target, or per-frame outcome field.
+`step_eef`, action delta, planner target, or per-frame outcome field. The
+authenticated masters do not define a public wall-clock rate, so the exporter
+does not invent seconds from a presumed simulation frequency.
 
 ## Agent transport
 
@@ -256,6 +266,13 @@ For a live observation, transport sends:
 - enabled metric-depth visualizations;
 - initial bbox/mask overlays when their switches are enabled.
 
+This public payload is independent of the Codex turn policy. In `single_turn`
+mode it is returned as dynamic-tool content. In `action_per_turn` mode the host
+returns only a non-strategic acknowledgement to the dynamic tool, ends that
+turn, and sends the exact same public payload as top-level multimodal input in
+the next turn of the same Codex thread. The latter creates no new simulator
+episode and does not add observation history.
+
 Metric `.npy` depth is exposed through a current-frame relative artifact path
 or an equivalent binary handle because it cannot be attached as image content.
 When paths are used, the referenced files are replaced on the next observation
@@ -263,20 +280,64 @@ instead of accumulating into an Agent-visible history. The response must
 describe every current artifact. Its bytes must be identical to the public
 frame bytes retained in the evaluator-private audit.
 
-## One serializer, two consumers
+## Shared contract, two delivery paths
 
-The implementation should converge on one `PublicObservationSerializer` that
-applies the profile and initial-annotation schedule once. Its output has two
-consumers:
+The static projector and live gateway both use the frozen Profile and
+annotation registries, the same public field names, and exact artifact
+validation. Their outputs have two different consumers:
 
 - `AgentTransport` inlines current numeric data, sends current display images,
   and publishes only current-frame file artifacts when necessary;
 - `PrivateAuditRecorder` writes the complete interaction outside the Agent
   workspace.
 
-The ICL exporter uses the same serializer in offline projection mode. This
-prevents the expert bundle, live tool response, and recorded live episode from
-drifting into different schemas.
+The current implementation keeps the offline projector and online transport as
+separate code paths because their source schemas and retention rules differ.
+Their cross-path contract is enforced by tests. A later refactor may introduce
+one `PublicObservationSerializer`, but the class name is not part of the public
+format.
+
+## Implemented fixed-demo workflow
+
+The projector authenticates the registered P6 master manifest before reading
+any frame, validates every source JSON/artifact hash, copies only allowlisted
+files (never symlinks), rewrites every path relative to the bundle, validates
+the completed bundle, and then publishes it atomically. The evaluator-private
+projection receipt records the source master path/hash and projected bundle
+hash; this receipt is not copied into the Agent workspace.
+
+Export one bundle for inspection:
+
+```bash
+../miniconda3/envs/UniVTAC/bin/python scripts/export_fixed_demo.py \
+  --fixed-demo-root /path/to/expert_observation_master \
+  --task pull_out_key --profile 6 \
+  --provide-bbox --provide-mask \
+  --output /tmp/pull_key_fixed_demo
+```
+
+Validate the complete registered matrix (two tasks, P1--P6, four annotation
+conditions):
+
+```bash
+../miniconda3/envs/UniVTAC/bin/python scripts/validate_fixed_demo_assets.py \
+  --fixed-demo-root /path/to/expert_observation_master \
+  --summary-only
+```
+
+The reference runner selects the diagnostic condition with
+`--icl none|fixed_demo`. `none` creates no expert directory and does not mention
+one to the Agent. `fixed_demo` projects the matching task/profile/annotation
+bundle into the temporary workspace before the Agent thread and adds only a minimal
+discoverability notice. It is incompatible with `--pre-move` because the
+registered demonstrations begin ungrasped. Final prompt wording remains a
+separately versioned benchmark decision.
+
+The fixed demonstration's private collection seed is also excluded from the
+same-task evaluation condition. Default evaluator seeds already come from a
+disjoint high random range; if an evaluator explicitly supplies the registered
+demo seed, a non-dry `fixed_demo` run fails before simulator startup. The seed
+itself remains absent from the public bundle and prompt.
 
 ## Production pipeline
 
@@ -322,36 +383,33 @@ A release is valid only if automated checks establish all of the following:
 | Area | Current status | Required change |
 | --- | --- | --- |
 | P1--P6 live sensing | Implemented | Preserve behavior |
-| live JSON and image delivery | Implemented | Align transport image selection with this contract |
-| live filesystem recording | Per-frame JSON/PNG/NPY implemented | Keep complete recording private; expose only current file-only artifacts to the Agent |
+| live JSON and image delivery | Current JSON and display images are sent directly | Preserve Profile filtering |
+| live filesystem recording | Private per-frame JSON/PNG/NPY plus current-only Agent artifacts implemented | Preserve replacement and hash checks |
 | live state | Inlined in every tool result | Preserve; do not publish an Agent-visible online state history |
 | live calibration | Inlined in every applicable tool result | Preserve; keep any calibration history private |
-| live annotations | Initial-only schedule implemented | Add static/real acceptance coverage during serializer convergence |
-| annotation masks | Single-channel binary PNG implemented | Preserve in the common serializer |
-| bbox display | Initial overlay is marked as transportable image content | Preserve in the common transport policy |
+| live annotations | Initial-only schedule and current-file replacement tested | Add real-run regression when simulator testing is available |
+| annotation masks | Single-channel binary PNG implemented | Preserve exact mode/value checks |
+| bbox display | Initial overlay is marked as transportable image content | Preserve initial-only transport |
 | expert P6 master | Complete P6 plus initial head/wrist bbox/mask | Treat v2 `expert_observation_master/` assets as the projection source |
 | expert action semantics | Correctly marked as observation waypoints | Preserve; do not add `step_eef` conversion |
-| static ICL bundle | Not implemented | Add Profile projection, relative paths, JSONL streams, and overview |
+| static ICL bundle | Implemented with exact validation and atomic publication | Freeze schema only after rollout review |
 | new expert collection | Historical source is RGB-focused | Record maximal P6 and initial annotation directly |
 | independent replay | P6 migration mode exists | Make maximal observation recording a normal replay product |
-| Codex general capabilities | Reference runner currently restricts them | Address separately; retain only embodied action protocol in benchmark core |
+| Codex general capabilities | Generic v1 runner inherits evaluator configuration and does not disable built-ins | Keep runtime policy evaluator-controlled and recorded |
 
-The two existing replay-proven demonstrations now have v2 maximal masters with
-the initial annotation source. Their sensor payload is complete. The remaining
-data-format work is the Agent-visible ICL exporter and the current-only live
-artifact transport; the remaining production work is the unified
-collection/replay pipeline for new assets.
+The two existing replay-proven demonstrations have v2 maximal masters with the
+initial annotation source. Their 48 public projections have been validated.
+The remaining production data work is to make maximal P6 plus initial
+annotations a normal output of collection and replay for future assets.
 
 ## Recommended work split
 
-With the initial annotations for the two existing masters completed and
-validated, development can proceed independently:
+With projection and runtime integration completed, development can proceed
+independently:
 
-1. ICL path: implement the static bundle exporter, Profile projection,
-   JSON/JSONL layout, and workspace presentation;
+1. ICL path: run real Codex rollouts, review usability, and freeze the final
+   prompt and schema wording;
 2. collection/replay path: make maximal P6 plus initial annotation a normal
    product of both stages and remove the extra migration pass for new assets;
-3. runtime path, later: keep a temporary clean workspace, publish only the
-   current live observation there when file artifacts are required, and allow
-   the evaluator's configured general Agent capabilities while recording them
-   in the run manifest.
+3. runtime path: retain the implemented clean temporary workspace and
+   current-only file publication while extending real-run acceptance coverage.

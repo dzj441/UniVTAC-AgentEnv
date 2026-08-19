@@ -7,10 +7,13 @@ import copy
 import hashlib
 import json
 import math
+import shutil
+import tempfile
 import threading
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from .artifacts import file_sha256
 from .benchmark_profiles import AnnotationCapabilities, ObservationProfile
 from .benchmark_tasks import BenchmarkTaskSpec
 from .capabilities import (
@@ -20,6 +23,7 @@ from .capabilities import (
     ToolCallLoopError,
     ToolInputError,
 )
+from .icl import ICLCondition, get_icl_condition
 
 
 JsonDict = dict[str, Any]
@@ -42,7 +46,9 @@ def _object_schema(
 
 
 def _evidence_sources(
-    profile: ObservationProfile, annotations: AnnotationCapabilities
+    profile: ObservationProfile,
+    annotations: AnnotationCapabilities,
+    icl_condition: ICLCondition,
 ) -> tuple[str, ...]:
     sources = [*profile.public_modalities, "robot_state"]
     if profile.expose_camera_intrinsics:
@@ -53,11 +59,15 @@ def _evidence_sources(
         sources.append("object_bbox")
     if annotations.provide_mask:
         sources.append("object_mask")
+    if icl_condition.fixed_demo_available:
+        sources.append("expert_demo")
     return tuple(sources)
 
 
 def _decision_schema(
-    profile: ObservationProfile, annotations: AnnotationCapabilities
+    profile: ObservationProfile,
+    annotations: AnnotationCapabilities,
+    icl_condition: ICLCondition,
 ) -> JsonDict:
     return {
         "type": "object",
@@ -79,7 +89,11 @@ def _decision_schema(
                     "additionalProperties": False,
                     "required": ["source", "finding", "implication"],
                     "properties": {
-                        "source": {"enum": list(_evidence_sources(profile, annotations))},
+                        "source": {
+                            "enum": list(
+                                _evidence_sources(profile, annotations, icl_condition)
+                            )
+                        },
                         "finding": _string_schema("What was directly observed."),
                         "implication": _string_schema("How it affects this decision."),
                     },
@@ -101,8 +115,11 @@ def _decision_schema(
 def build_benchmark_tool_registry(
     profile: ObservationProfile,
     annotations: AnnotationCapabilities,
+    icl_condition: ICLCondition | str = "none",
 ) -> dict[str, EmbodiedToolSpec]:
-    decision = _decision_schema(profile, annotations)
+    if isinstance(icl_condition, str):
+        icl_condition = get_icl_condition(icl_condition)
+    decision = _decision_schema(profile, annotations, icl_condition)
     observation_id = _string_schema("Latest observation_id returned by a successful tool.")
     vector3 = {
         "type": "array",
@@ -189,18 +206,19 @@ def benchmark_capability_manifest(
     annotations: AnnotationCapabilities,
     *,
     pre_move: bool = False,
+    icl_condition: ICLCondition | str = "none",
 ) -> JsonDict:
-    tools = build_benchmark_tool_registry(profile, annotations)
+    if isinstance(icl_condition, str):
+        icl_condition = get_icl_condition(icl_condition)
+    tools = build_benchmark_tool_registry(profile, annotations, icl_condition)
     payload: JsonDict = {
         "schema_version": "univtac.embodied_codex_capabilities.v1",
         "task": task.to_manifest(pre_move=pre_move),
         "observation_profile": profile.to_manifest(),
         "annotations": annotations.to_manifest(),
+        "icl": icl_condition.to_manifest(),
         "tools": [tool.to_manifest() for tool in tools.values()],
         "forbidden_agent_capabilities": [
-            "shell or arbitrary code execution",
-            "filesystem reads or writes",
-            "web, apps, plugins, skills, or subagents",
             "direct IK, joint targets, or trajectory-planner access",
             "raw simulator instance IDs, labels, or USD prim paths",
             "task-success feedback before finish_episode",
@@ -224,13 +242,23 @@ class BenchmarkCapabilityGateway:
         annotations: AnnotationCapabilities,
         simulator_request: SimulatorRequest,
         simulator_run_dir: Path,
+        icl_condition: ICLCondition | str = "none",
+        agent_workspace: Path | None = None,
     ) -> None:
         self.task = task
         self.profile = profile
         self.annotations = annotations
-        self.registry = build_benchmark_tool_registry(profile, annotations)
+        if isinstance(icl_condition, str):
+            icl_condition = get_icl_condition(icl_condition)
+        self.icl_condition = icl_condition
+        self.registry = build_benchmark_tool_registry(
+            profile, annotations, icl_condition
+        )
         self._simulator_request = simulator_request
         self.simulator_run_dir = simulator_run_dir.resolve()
+        self.agent_workspace = (
+            agent_workspace.resolve() if agent_workspace is not None else None
+        )
         self.stage = "ready"
         self.latest_observation_id: str | None = None
         self.terminal = False
@@ -268,7 +296,11 @@ class BenchmarkCapabilityGateway:
             if not isinstance(raw, dict):
                 raise RuntimeError("Simulator returned a non-object response")
             self._assert_no_leak(raw)
-            public, images = self._publicize(raw)
+            current_artifacts = self._publish_current_artifacts(raw)
+            public, images = self._publicize(
+                raw,
+                current_artifacts=current_artifacts,
+            )
             self._update_state(raw)
             success = raw.get("status") != "command_error"
             if success:
@@ -374,7 +406,13 @@ class BenchmarkCapabilityGateway:
         evidence = value["evidence"]
         if not isinstance(evidence, list) or not evidence:
             raise ToolInputError("decision_record.evidence must be a non-empty array")
-        allowed_sources = set(_evidence_sources(self.profile, self.annotations))
+        allowed_sources = set(
+            _evidence_sources(
+                self.profile,
+                self.annotations,
+                self.icl_condition,
+            )
+        )
         normalized_evidence: list[JsonDict] = []
         for item in evidence:
             if not isinstance(item, dict) or set(item) != {"source", "finding", "implication"}:
@@ -440,11 +478,116 @@ class BenchmarkCapabilityGateway:
 
         visit(response)
 
+    def _publish_current_artifacts(self, response: JsonDict) -> dict[Path, str]:
+        """Expose only current metric arrays/raw masks in the Agent workspace."""
+
+        if self.agent_workspace is None:
+            return {}
+        observation = response.get("observation")
+        if not isinstance(observation, dict):
+            return {}
+        observation_id = observation.get("observation_id")
+        if not isinstance(observation_id, str) or not observation_id:
+            raise CapabilityViolation("Current artifact publication requires observation_id")
+
+        selected: list[tuple[Path, str, str]] = []
+
+        def collect(value: Any, *, key: str = "artifact") -> None:
+            if isinstance(value, list):
+                for item in value:
+                    collect(item, key=key)
+                return
+            if not isinstance(value, dict):
+                return
+            raw_path = value.get("path")
+            digest = value.get("sha256")
+            if (
+                isinstance(raw_path, str)
+                and isinstance(digest, str)
+                and (
+                    value.get("media_type") == "application/x-npy"
+                    or (
+                        key == "mask"
+                        and value.get("media_type") == "image/png"
+                        and value.get("content_image") is False
+                    )
+                )
+            ):
+                source = Path(raw_path).resolve()
+                if not source.is_relative_to(self.simulator_run_dir) or not source.is_file():
+                    raise CapabilityViolation(
+                        "Current artifact escaped the simulator run directory"
+                    )
+                if file_sha256(source) != digest:
+                    raise CapabilityViolation("Current artifact hash mismatch")
+                relative = source.relative_to(self.simulator_run_dir)
+                expected_prefix = Path("observations") / observation_id
+                try:
+                    payload_relative = relative.relative_to(expected_prefix)
+                except ValueError as exc:
+                    raise CapabilityViolation(
+                        "Current artifact does not belong to the returned observation"
+                    ) from exc
+                if not payload_relative.parts or ".." in payload_relative.parts:
+                    raise CapabilityViolation("Current artifact path is unsafe")
+                selected.append((source, payload_relative.as_posix(), digest))
+            for child_key, child in value.items():
+                collect(child, key=child_key)
+
+        collect(observation)
+        inputs_root = self.agent_workspace / "benchmark_inputs"
+        current_root = inputs_root / "current_observation"
+        inputs_root.mkdir(parents=True, exist_ok=True)
+        if not selected:
+            if current_root.exists():
+                shutil.rmtree(current_root)
+            return {}
+
+        temporary = Path(
+            tempfile.mkdtemp(prefix=".current_observation-", dir=inputs_root)
+        ).resolve()
+        published: dict[Path, str] = {}
+        files: list[dict[str, str]] = []
+        try:
+            for source, relative, digest in selected:
+                destination = temporary / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, destination)
+                if file_sha256(destination) != digest:
+                    raise CapabilityViolation("Current artifact changed while copying")
+                workspace_relative = (
+                    Path("benchmark_inputs") / "current_observation" / relative
+                ).as_posix()
+                published[source] = workspace_relative
+                files.append({"path": relative, "sha256": digest})
+            manifest = {
+                "schema_version": "univtac.current_observation_artifacts.v1",
+                "observation_id": observation_id,
+                "retention": "current_observation_only",
+                "files": files,
+            }
+            (temporary / "manifest.json").write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            if current_root.exists():
+                shutil.rmtree(current_root)
+            temporary.replace(current_root)
+        except BaseException:
+            if temporary.exists():
+                shutil.rmtree(temporary)
+            raise
+        return published
+
     def _publicize(
-        self, response: JsonDict
+        self,
+        response: JsonDict,
+        *,
+        current_artifacts: Mapping[Path, str] | None = None,
     ) -> tuple[JsonDict, list[tuple[str, Path, str]]]:
         images: list[tuple[str, Path, str]] = []
         seen: set[Path] = set()
+        current_artifacts = current_artifacts or {}
 
         def visit(value: Any, *, key: str = "artifact") -> Any:
             if isinstance(value, list):
@@ -459,6 +602,8 @@ class BenchmarkCapabilityGateway:
                 if not path.is_relative_to(self.simulator_run_dir):
                     raise CapabilityViolation("Artifact path escaped the simulator run directory")
                 output["artifact_id"] = str(path.relative_to(self.simulator_run_dir))
+                if path in current_artifacts:
+                    output["workspace_path"] = current_artifacts[path]
             for child_key, child_value in value.items():
                 if child_key in {"path", "run_dir", "content_image"}:
                     continue
