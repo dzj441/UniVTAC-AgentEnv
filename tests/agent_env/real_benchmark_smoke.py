@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from PIL import Image
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -155,7 +156,14 @@ def assert_full_p6_observation(
                 else:
                     assert "bbox_xyxy_exclusive" not in annotation
                 if mask:
-                    assert_artifact(run_dir, annotation["mask"], "image/png")
+                    mask_path = assert_artifact(
+                        run_dir, annotation["mask"], "image/png"
+                    )
+                    assert_artifact(
+                        run_dir, annotation["mask_overlay"], "image/png"
+                    )
+                    with Image.open(mask_path) as mask_image:
+                        assert mask_image.mode == "L"
                 else:
                     assert "mask" not in annotation
     else:
@@ -273,8 +281,8 @@ def main() -> None:
             run_dir,
             args.task,
             stepped["observation"],
-            bbox=args.provide_bbox,
-            mask=args.provide_mask,
+            bbox=False,
+            mask=False,
         )
         assert not private_audit.exists()
 
@@ -292,8 +300,8 @@ def main() -> None:
             run_dir,
             args.task,
             outcome["observation"],
-            bbox=args.provide_bbox,
-            mask=args.provide_mask,
+            bbox=False,
+            mask=False,
         )
         client.send({"command": "close"})
         client.result("closing")

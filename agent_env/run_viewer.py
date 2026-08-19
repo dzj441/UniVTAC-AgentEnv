@@ -207,7 +207,14 @@ def _normalize_observation(value: Any, run_dir: Path) -> dict[str, Any] | None:
             for role, annotation in roles.items():
                 if not isinstance(annotation, dict):
                     continue
-                for feature, suffix in (("bbox_overlay", "bbox"), ("mask", "mask")):
+                display_features = [("bbox_overlay", "bbox")]
+                display_features.append(
+                    (
+                        "mask_overlay" if "mask_overlay" in annotation else "mask",
+                        "mask",
+                    )
+                )
+                for feature, suffix in display_features:
                     viewable = _viewable_artifact(run_dir, annotation.get(feature))
                     if viewable is not None:
                         modalities[f"{camera}_{role}_{suffix}"] = viewable

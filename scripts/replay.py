@@ -6,6 +6,7 @@ sys.path.append('../')
 import os
 import time
 import json
+import hashlib
 import yaml
 import torch
 import argparse
@@ -72,6 +73,20 @@ parser.add_argument(
     default=60,
     help="Physics steps used for terminal stability verification.",
 )
+parser.add_argument(
+    "--capture-p6-master",
+    action="store_true",
+    help=(
+        "Capture a complete P6 observation at every recorded source waypoint. "
+        "This records observation states only and does not derive step_eef actions."
+    ),
+)
+parser.add_argument(
+    "--fixed-expert-manifest",
+    type=Path,
+    default=None,
+    help="Replay-proven frozen source manifest required by --capture-p6-master.",
+)
 AppLauncher.add_app_launcher_args(parser)
 
 # parse the arguments
@@ -80,6 +95,21 @@ if args_cli.stride <= 0:
     parser.error("--stride must be a positive integer")
 if args_cli.settle_steps < 0:
     parser.error("--settle-steps must be non-negative")
+if args_cli.capture_p6_master:
+    if not args_cli.trajectory_includes_pre_move:
+        parser.error("--capture-p6-master requires --trajectory-includes-pre-move")
+    if args_cli.stride != 1:
+        parser.error("--capture-p6-master requires --stride 1")
+    if args_cli.data_path is None or args_cli.fixed_expert_manifest is None:
+        parser.error(
+            "--capture-p6-master requires --data-path and --fixed-expert-manifest"
+        )
+    if args_cli.output_dir is None:
+        parser.error("--capture-p6-master requires an explicit --output-dir")
+    if args_cli.output_dir.exists():
+        parser.error(
+            f"--capture-p6-master output directory already exists: {args_cli.output_dir}"
+        )
 args_cli.enable_cameras = True
 args_cli.livestream = 2
 args_cli.num_envs = 1
@@ -95,6 +125,11 @@ import importlib
 from typing import TYPE_CHECKING
 from envs.utils.data import HDF5Handler
 from agent_env.expert_trajectory import inspect_expert_hdf5
+from agent_env.p6_expert_master import (
+    build_p6_master_manifest,
+    capture_p6_observation,
+    validate_fixed_expert_source,
+)
 if TYPE_CHECKING:
     from envs._base_task import BaseTask, BaseTaskCfg
 
@@ -183,6 +218,15 @@ def replay(task: 'BaseTask', seed, data_path:Path):
         # Reject historical post-pre_move episodes before they can be mistaken
         # for a complete ungrasped expert demonstration.
         source_trajectory = inspect_expert_hdf5(data_path)
+    task_name = task.__class__.__module__.rsplit('.', 1)[-1]
+    p6_source = None
+    if args_cli.capture_p6_master:
+        p6_source = validate_fixed_expert_source(
+            manifest_path=args_cli.fixed_expert_manifest,
+            source_hdf5=data_path,
+            task=task_name,
+            seed=int(seed),
+        )
     task.reset(seed=seed)
 
     traj_data = HDF5Handler().load_hdf5(data_path)
@@ -198,6 +242,7 @@ def replay(task: 'BaseTask', seed, data_path:Path):
         applied_indices.append(qpos_list.shape[0] - 1)
     execution_succeeded = True
     physics_action_count = 0
+    p6_waypoints = []
     previous_idx = None
     for idx in applied_indices:
         action = qpos_list[idx]
@@ -238,6 +283,28 @@ def replay(task: 'BaseTask', seed, data_path:Path):
             'source_sim_step': int(source_steps[idx]),
             'replayed_physics_steps': sim_step_delta,
         })
+        if args_cli.capture_p6_master:
+            observation_id = f'demo_obs_{idx:03d}'
+            p6_observation, tactile_health = capture_p6_observation(
+                task=task,
+                task_name=task_name,
+                observation_id=observation_id,
+                observation_root=task.save_root / 'p6_observations',
+                initial_observation=idx == applied_indices[0],
+            )
+            p6_waypoints.append({
+                'source_frame_index': int(idx),
+                'source_sim_step': int(source_steps[idx]),
+                'observation_file': str(
+                    (
+                        task.save_root
+                        / 'p6_observations'
+                        / p6_observation['observation_id']
+                        / 'observation.json'
+                    ).resolve()
+                ),
+                'tactile_health': tactile_health,
+            })
         previous_idx = idx
 
     manipulated_actor = task.bottle if hasattr(task, 'bottle') else task.key
@@ -261,7 +328,7 @@ def replay(task: 'BaseTask', seed, data_path:Path):
     )
     report = {
         'schema_version': 'univtac.fixed_expert_replay.v1',
-        'task': task.__class__.__module__.rsplit('.', 1)[-1],
+        'task': task_name,
         'seed': int(seed),
         'source_hdf5': str(data_path.resolve()),
         'source_trajectory': source_trajectory,
@@ -284,6 +351,30 @@ def replay(task: 'BaseTask', seed, data_path:Path):
         'replay_video': str(video_path.resolve()),
         'wall_seconds': eval_cost,
     }
+    if args_cli.capture_p6_master:
+        if p6_source is None:
+            raise RuntimeError('P6 source validation was not initialized')
+        p6_manifest = build_p6_master_manifest(
+            task=task_name,
+            seed=int(seed),
+            fixed_expert_manifest_path=p6_source['manifest_path'],
+            source_hdf5=data_path,
+            master_root=task.save_root,
+            waypoint_records=p6_waypoints,
+            physics_action_count=physics_action_count,
+            execution_succeeded=execution_succeeded,
+            official_task_success=official_success,
+            evaluator_checks=evaluator_checks,
+            replay_video=video_path,
+        )
+        p6_manifest_path = task.save_root / 'p6_master_manifest.json'
+        _write_json(p6_manifest_path, p6_manifest, indent=2)
+        report['p6_master'] = {
+            'manifest': str(p6_manifest_path.resolve()),
+            'sha256': hashlib.sha256(p6_manifest_path.read_bytes()).hexdigest(),
+            'observation_count': len(p6_waypoints),
+            'actions_present': False,
+        }
     report_root = task.save_root / 'replay_report'
     report_root.mkdir(parents=True, exist_ok=True)
     _write_json(report_root / f'{seed}.json', report, indent=2)
@@ -350,6 +441,26 @@ def main():
     env_cfg.execute_pre_move = not args_cli.trajectory_includes_pre_move
     if args_cli.trajectory_includes_pre_move:
         env_cfg.step_lim = max(env_cfg.step_lim, 5000)
+    if args_cli.capture_p6_master:
+        # The first high-fidelity TacEx reset compiles renderer/solver state and
+        # can legitimately exceed the historical RGB-only 120-second limit.
+        env_cfg.reset_time_limit = max(float(env_cfg.reset_time_limit), 900.0)
+        env_cfg.obs_data_type = {
+            'camera': ['rgb', 'depth'],
+            'tactile': ['rgb_marker'],
+            'embodiment': ['joint', 'ee'],
+        }
+        if {camera.name for camera in env_cfg.cameras} != {'head', 'wrist'}:
+            raise RuntimeError('P6 capture requires exactly head and wrist cameras')
+        for camera in env_cfg.cameras:
+            camera.data_types = [
+                'rgb',
+                'depth',
+                'instance_id_segmentation_fast',
+            ]
+            camera.update_latest_camera_pose = True
+            camera.colorize_instance_id_segmentation = False
+        env_cfg.random_texture = False
 
     env_cfg.scene.num_envs = 1
     env_cfg.sim.device = args_cli.device if args_cli.device is not None \

@@ -114,3 +114,63 @@ Both replay reports passed the official task checker after 60 settling steps.
 The bottle replay additionally verified gripper release and post-release pose
 stability. Source HDF5 and both source/replay H.264 videos are content-hashed
 by their frozen manifests.
+
+## Derive the P6 observation master
+
+The frozen source remains the authority for expert motion and its independent
+success proof. It does not contain complete P5/P6 camera observations, so a
+sensor-enhanced replay records one full P6 observation after reaching each
+original source waypoint. The final public-data contract is defined in
+[`PublicObservationAndICLDataContract.md`](PublicObservationAndICLDataContract.md).
+
+```bash
+../miniconda3/envs/UniVTAC/bin/python scripts/replay.py \
+  pull_out_key fixed_expert \
+  --data-path SOURCE.hdf5 --seed SEED \
+  --trajectory-includes-pre-move --stride 1 \
+  --capture-p6-master --fixed-expert-manifest FROZEN_MANIFEST.json \
+  --output-dir P6_MASTER_OUTPUT
+```
+
+This is an observation-state trajectory, not an Agent action trace. Replay
+continues to follow the authenticated qpos source at its recorded timestamps;
+it neither derives nor claims `step_eef` actions. Each waypoint contains:
+
+- head and wrist RGB plus metric depth, validity masks, and depth previews;
+- camera intrinsics and dynamic robot-base camera extrinsics;
+- left and right public tactile marker RGB;
+- the public joint, gripper-width, and EEF-pose state;
+- an inspection composite.
+
+The initial waypoint additionally contains anonymous head/wrist bbox and
+single-channel binary mask assets for `manipulated_object` and `goal_fixture`.
+No later waypoint contains annotation fields, files, or annotated composites.
+
+The writer authenticates the frozen manifest and source HDF5 before reset. It
+then validates the exact P6 schema and hashes every observation artifact before
+writing `p6_master_manifest.json`. A master is rejected unless replay reaches
+all source waypoints, passes the terminal task checker after 60 settling steps,
+and, for the bottle task, also passes release and pose-stability checks.
+
+The v2 P6 manifest is host-side provenance and deliberately has
+`agent_ready=false`, `actions_present=false`, and
+`step_eef_conversion_performed=false`. It may contain evaluator evidence and
+must not be handed directly to an Agent. Agent-visible demonstration
+projection is a separate future design step.
+
+## Current maximal expert observation masters
+
+The original frozen HDF5, videos, manifests, and replay reports remain
+unchanged. The following derived masters have independently re-run the same
+motion and success checks:
+
+| Task | Seed | P6 observations | Replayed physics actions | P6 master manifest |
+| --- | ---: | ---: | ---: | --- |
+| `pull_out_key` | 0 | 28 | 551 | `expert_observation_master/pull_out_key_seed_0/p6_master_manifest.json` |
+| `put_bottle_in_shelf` | 1 | 44 | 871 | `expert_observation_master/put_bottle_in_shelf_seed_1/p6_master_manifest.json` |
+
+These paths are relative to the same staging root shown above. Both v2 masters
+contain complete P6 observations at every original saved waypoint and both
+independent annotation sources at the initial waypoint only. The earlier
+`p6_master/` v1 directories are retained as immutable migration evidence but
+are superseded because they do not contain annotation sources.

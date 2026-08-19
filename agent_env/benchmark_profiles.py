@@ -90,6 +90,7 @@ class AnnotationCapabilities:
         return {
             "bbox": self.provide_bbox,
             "mask": self.provide_mask,
+            "schedule": "initial_observation_only",
             "enabled_features": list(self.enabled_features),
             "public_roles": ["manipulated_object", "goal_fixture"],
             "raw_instance_ids": False,

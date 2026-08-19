@@ -384,7 +384,7 @@ class EmbodiedAgentEnv:
                             f"is {distance:.4f} m"
                         )
 
-            if self.annotations.enabled_features:
+            if initial_observation and self.annotations.enabled_features:
                 instance = camera_plane(camera.data.output[INSTANCE_DATA_TYPE])
                 mapping = normalize_instance_mapping(self._camera_info_for_instance(camera))
                 if not mapping:
@@ -400,7 +400,7 @@ class EmbodiedAgentEnv:
                 ):
                     mask, selected_ids = instance_role_mask(instance, mapping, private_name)
                     annotation, annotation_panels = save_annotation_artifacts(
-                        obs_dir / camera_name,
+                        obs_dir / "annotations" / camera_name,
                         role=role,
                         mask=mask,
                         rgb=rgb,

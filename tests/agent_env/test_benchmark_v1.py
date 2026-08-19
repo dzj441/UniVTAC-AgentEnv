@@ -4,6 +4,7 @@ import hashlib
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from agent_env.benchmark_capabilities import (
     BenchmarkCapabilityGateway,
@@ -89,6 +90,7 @@ def test_annotation_switches_are_independently_composable(
 ) -> None:
     manifest = AnnotationCapabilities(bbox, mask).to_manifest()
     assert manifest["enabled_features"] == features
+    assert manifest["schedule"] == "initial_observation_only"
     assert manifest["raw_instance_ids"] is False
     assert manifest["raw_labels"] is False
 
@@ -289,8 +291,15 @@ def test_native_depth_and_anonymous_annotation_artifacts(tmp_path: Path) -> None
         "bbox_xyxy_exclusive",
         "bbox_overlay",
         "mask",
+        "mask_overlay",
     }
     assert len(panels) == 2
+    assert public["bbox_overlay"]["content_image"] is True
+    assert public["mask"]["content_image"] is False
+    assert public["mask_overlay"]["content_image"] is True
+    with Image.open(public["mask"]["path"]) as image:
+        assert image.mode == "L"
+        assert set(image.getdata()) == {0, 255}
     assert "key" not in str(public)
 
 

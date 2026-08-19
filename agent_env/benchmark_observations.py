@@ -185,13 +185,39 @@ def save_annotation_artifacts(
         public["bbox_overlay"] = image_artifact(
             directory / f"{role}_bbox_overlay.png",
             overlay_array,
-            content_image=False,
+            content_image=True,
         )
         panels.append((f"{role}_bbox", overlay_array))
     if provide_mask:
-        mask_rgb = np.repeat((mask.astype(np.uint8) * 255)[..., None], 3, axis=2)
-        public["mask"] = image_artifact(directory / f"{role}_mask.png", mask_rgb)
-        panels.append((f"{role}_mask", mask_rgb))
+        mask_u8 = mask.astype(np.uint8) * 255
+        mask_path = directory / f"{role}_mask.png"
+        Image.fromarray(mask_u8, mode="L").save(mask_path)
+        public["mask"] = {
+            "path": str(mask_path.resolve()),
+            "sha256": file_sha256(mask_path),
+            "media_type": "image/png",
+            "content_image": False,
+            "mode": "L",
+            "background_value": 0,
+            "foreground_value": 255,
+        }
+        color = (
+            np.asarray([0, 255, 127], dtype=np.float32)
+            if role == "manipulated_object"
+            else np.asarray([255, 64, 192], dtype=np.float32)
+        )
+        mask_overlay = rgb.copy()
+        mask_overlay[mask] = np.clip(
+            0.55 * rgb[mask].astype(np.float32) + 0.45 * color,
+            0,
+            255,
+        ).astype(np.uint8)
+        public["mask_overlay"] = image_artifact(
+            directory / f"{role}_mask_overlay.png",
+            mask_overlay,
+            content_image=True,
+        )
+        panels.append((f"{role}_mask", mask_overlay))
     return public, panels
 
 
