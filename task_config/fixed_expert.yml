@@ -1,0 +1,22 @@
+save_dir: ./data
+
+decimation: 1
+save_frequency: 20
+video_frequency: 2
+render_frequency: 0
+
+random_texture: false
+use_seed: true
+episode_num: 1
+sensor_type: gsmini
+
+# Preserve the initial ungrasped snapshot and all saved planner states from
+# pre_move before continuing through the normal task demonstration.
+record_pre_move: true
+max_save_frames: 2500
+
+observations:
+  camera: [rgb]
+  tactile: [rgb, rgb_marker, marker, depth, pose]
+  embodiment: [joint, ee]
+  actor: true

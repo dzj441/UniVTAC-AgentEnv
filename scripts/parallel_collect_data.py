@@ -76,6 +76,10 @@ def worker_run(task_config, task_file_name, base_save_dir: Path, seed_q: Queue,
         env_cfg.video_frequency = task_config.get("video_frequency", env_cfg.video_frequency)
         env_cfg.render_frequency = task_config.get("render_frequency", env_cfg.render_frequency)
         env_cfg.obs_data_type = task_config.get("observations", {})
+        env_cfg.record_pre_move = bool(task_config.get("record_pre_move", False))
+        env_cfg.max_save_frames = task_config.get(
+            "max_save_frames", env_cfg.max_save_frames
+        )
         env_cfg.scene.num_envs = 1
         # Device routing by CUDA env
 

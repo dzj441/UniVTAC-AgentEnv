@@ -195,6 +195,13 @@ class BaseTaskCfg(DirectRLEnvCfg):
     keep_contact: bool = False
     max_save_frames: int = 1000
 
+    # Opt-in expert-demonstration support. Existing collection keeps its
+    # historical post-pre_move format unless record_pre_move is enabled.
+    record_pre_move: bool = False
+    # Replay of a trajectory that already contains pre_move must start from
+    # the ungrasped reset state instead of executing privileged setup again.
+    execute_pre_move: bool = True
+
     # some filler values, needed for DirectRLEnv
     episode_length_s = 0
     action_space = 0
@@ -332,6 +339,11 @@ class BaseTask(UipcRLEnv):
     def pre_move(self):
         pass
 
+    def initialize_task_references(self):
+        """Initialize checker targets without privileged robot/object motion."""
+
+        pass
+
     def create_actors(self):
         pass
 
@@ -419,7 +431,21 @@ class BaseTask(UipcRLEnv):
                 )
         self._update_render()
 
-        self.pre_move()
+        self.metadata["record_pre_move"] = bool(self.cfg.record_pre_move)
+        self.metadata["execute_pre_move"] = bool(self.cfg.execute_pre_move)
+        if self.mode == 'collect' and self.cfg.record_pre_move:
+            self.atom_id = 0
+            self.atom_tag = 'pre_move_start'
+            self.metadata["pre_move_start_frame"] = self.save_count
+            self._save_collection_snapshot()
+
+        if self.cfg.execute_pre_move:
+            self.pre_move()
+        else:
+            self.initialize_task_references()
+
+        if self.mode == 'collect' and self.cfg.record_pre_move:
+            self.metadata["pre_move_end_frame_exclusive"] = self.save_count
         self.in_pre_move = False
 
         # update render to avoid artifacts
@@ -538,8 +564,13 @@ class BaseTask(UipcRLEnv):
         
         self.step_count += 1
 
-        is_save = is_save and (not self.in_pre_move) and (not self.mode == 'eval_test')
-        save_freq = (self.cfg.video_frequency > 0 and self.step_count % self.cfg.save_frequency == 0)
+        is_save = is_save \
+            and (not self.in_pre_move or self.cfg.record_pre_move) \
+            and (not self.mode == 'eval_test')
+        save_freq = (
+            self.cfg.save_frequency > 0
+            and self.step_count % self.cfg.save_frequency == 0
+        )
         video_freq = (self.cfg.video_frequency > 0 and self.step_count % self.cfg.video_frequency == 0)
         render_freq = (self.cfg.render_frequency > 0 and self.step_count % self.cfg.render_frequency == 0)
 
@@ -628,7 +659,20 @@ class BaseTask(UipcRLEnv):
             obs['tactile'] = self._tactile_manager.get_observations(self.cfg.obs_data_type['tactile'])
         if 'actor' in self.cfg.obs_data_type:
             obs['actor'] = self._actor_manager.get_observations()
+        if self.mode == 'collect' and self.cfg.record_pre_move:
+            obs['collection'] = {
+                'phase': 'pre_move' if self.in_pre_move else 'task',
+            }
         return obs
+
+    def _save_collection_snapshot(self):
+        """Save one exact observation without advancing the simulator."""
+
+        self._update_render()
+        obs = self._get_observations()
+        self.save_observations(obs)
+        if self.cfg.video_frequency > 0:
+            self.video_handler.write(self.get_frame_shot(obs))
     
     def clean_cache(self, mean_steps:float=0.0, result:str=None):
         self.mean_steps = mean_steps

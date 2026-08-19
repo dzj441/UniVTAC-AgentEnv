@@ -54,10 +54,13 @@ class Task(BaseTask):
         self.move(self.atom.grasp_actor(
             self.bottle, contact_point_id=grasp_idx, pre_dis=0.0, is_close=False
         ))
-        
+
+        self.initialize_task_references()
+        self.move(self.atom.close_gripper())
+
+    def initialize_task_references(self):
         base_pose = self.shelf.get_pose()
         self.place_target = base_pose.add_bias([-0.2, 0, 0.21])
-        self.move(self.atom.close_gripper())
 
     def _play_once(self):
         lift_height = 0.15 + self.rng.uniform(0.0, 0.05)

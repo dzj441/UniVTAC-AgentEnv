@@ -63,6 +63,9 @@ To build more tasks, refer to the [Task Creation Guide](./docs/TaskCreation.md) 
 
 See the [Data Collection Guide](./docs/Collection.md) for instructions on how to run the automated data collection pipeline, configure task-specific parameters, and understand the output data structure.
 
+For fixed ICL demonstrations that include approach and grasp, see
+[Fixed Expert Trajectories](./docs/FixedExpertTrajectories.md).
+
 Dataset containing 100 episodes per task can be downloaded from [HuggingFace](https://huggingface.co/datasets/byml/UniVTAC), [Modelscope](https://modelscope.cn/datasets/byml2024/UniVTAC) or by running the script in `data/download.sh`.
 
 ## Train & Eval Policies

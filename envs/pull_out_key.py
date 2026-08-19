@@ -57,7 +57,10 @@ class Task(BaseTask):
             contact_point_id=self.cid,
             pre_dis=0.08, dis=0.0
         ))
-        
+
+        self.initialize_task_references()
+
+    def initialize_task_references(self):
         self.target_pose = self.key.get_pose()
         self.target_pose[3:] = self.slot.get_pose().add_rotation([0, 0, 0.1])[3:]
         self.slot_init_pose = self.slot.get_pose()

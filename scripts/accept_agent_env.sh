@@ -46,6 +46,10 @@ cd "${REPO_ROOT}"
   semantic_tools/*.py \
   scripts/grasp_classify_agent_env.py \
   scripts/embodied_agent_env.py \
+  scripts/collect_data.py \
+  scripts/parallel_collect_data.py \
+  scripts/replay.py \
+  scripts/freeze_fixed_expert.py \
   scripts/run_codex_agent_env.py \
   scripts/run_codex_benchmark.py \
   scripts/run_agent_viewer.py \

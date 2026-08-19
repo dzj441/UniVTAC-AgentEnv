@@ -46,6 +46,18 @@ parser.add_argument(
     type=str,
     default=None,
 )
+parser.add_argument(
+    "--record-pre-move",
+    "--record_pre_move",
+    action="store_true",
+    help="Include the privileged pre_move/setup phase in the saved trajectory.",
+)
+parser.add_argument(
+    "--save-dir",
+    type=Path,
+    default=None,
+    help="Override the configured collection root.",
+)
 
 args_cli = parser.parse_args()
 if args_cli.gpu is not None:
@@ -181,13 +193,20 @@ def main():
     task_module = importlib.import_module(f"envs.{task_file_name}")
     env_cfg:'BaseTaskCfg' = task_module.TaskCfg()
     env_cfg.tactile_sensor_type = task_config.get('sensor_type', 'gsmini')
-    env_cfg.save_dir = Path(task_config.get("save_dir", "./data")) / task_file_name / task_config_file.stem
+    save_dir = args_cli.save_dir or Path(task_config.get("save_dir", "./data"))
+    env_cfg.save_dir = Path(save_dir) / task_file_name / task_config_file.stem
     env_cfg.decimation = task_config.get("decimation", env_cfg.decimation)
     env_cfg.save_frequency = task_config.get("save_frequency", env_cfg.save_frequency)
     env_cfg.video_frequency = task_config.get("video_frequency", env_cfg.video_frequency)
     env_cfg.render_frequency = task_config.get("render_frequency", env_cfg.render_frequency)
     env_cfg.obs_data_type = task_config.get("observations", {})
     env_cfg.random_texture = task_config.get("random_texture", False)
+    env_cfg.record_pre_move = bool(
+        args_cli.record_pre_move or task_config.get("record_pre_move", False)
+    )
+    env_cfg.max_save_frames = task_config.get(
+        "max_save_frames", env_cfg.max_save_frames
+    )
 
     env_cfg.scene.num_envs = 1
     

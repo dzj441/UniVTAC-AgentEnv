@@ -152,16 +152,7 @@ class AgentEnvTask(TASK_CLASS):
         if PRE_MOVE_ENABLED:
             super().pre_move()
             return
-        if TASK_SPEC.name == "pull_out_key":
-            self.target_pose = self.key.get_pose()
-            self.target_pose[3:] = self.slot.get_pose().add_rotation([0, 0, 0.1])[3:]
-            self.slot_init_pose = self.slot.get_pose()
-        elif TASK_SPEC.name == "put_bottle_in_shelf":
-            self.place_target = self.shelf.get_pose().add_bias([-0.2, 0, 0.21])
-        else:
-            raise RuntimeError(
-                f"No ungrasped checker-state initializer for {TASK_SPEC.name!r}"
-            )
+        self.initialize_task_references()
 
 
 def utc_now() -> str:

@@ -2,7 +2,9 @@ import os
 import cv2
 import h5py
 import pickle
+import shutil
 import subprocess
+import sys
 
 import torch
 import numpy as np
@@ -241,10 +243,22 @@ class VideoHandler:
         self.ffmpeg = None
 
     @staticmethod
-    def _video_encoder():
+    def _ffmpeg_executable():
+        on_path = shutil.which("ffmpeg")
+        if on_path is not None:
+            return on_path
+        beside_python = Path(sys.executable).resolve().parent / "ffmpeg"
+        if beside_python.is_file():
+            return str(beside_python)
+        raise FileNotFoundError(
+            f"Could not find 'ffmpeg' on PATH or beside {sys.executable}"
+        )
+
+    @staticmethod
+    def _video_encoder(ffmpeg):
         """Select an H.264 encoder available in the active ffmpeg build."""
         encoders = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-encoders"],
+            [ffmpeg, "-hide_banner", "-encoders"],
             check=True,
             capture_output=True,
             text=True,
@@ -262,16 +276,17 @@ class VideoHandler:
         if self.ffmpeg is not None:
             self.close()
 
+        ffmpeg = self._ffmpeg_executable()
         self.video_path = Path(video_path)
         self.video_path.parent.mkdir(parents=True, exist_ok=True)
         self.video_size = video_size
         w, h = video_size
         self.ffmpeg = subprocess.Popen([
-            "ffmpeg", "-y", "-loglevel", "error",
+            ffmpeg, "-y", "-loglevel", "error",
             "-f", "rawvideo", "-pixel_format", "rgb24",
             "-video_size", f"{w}x{h}", "-framerate", "10",
             "-i", "-", "-pix_fmt", "yuv420p",
-            *self._video_encoder(),
+            *self._video_encoder(ffmpeg),
             "-movflags", "+faststart",
             str(self.video_path)
         ], stdin=subprocess.PIPE)
@@ -295,6 +310,8 @@ class VideoHandler:
         self.video_path.unlink(missing_ok=True)
  
     def close(self, result:str=None):
+        if self.ffmpeg is None:
+            return
         self.ffmpeg.stdin.close()
         self.ffmpeg.wait()
         del self.ffmpeg

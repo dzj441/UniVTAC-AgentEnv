@@ -11,11 +11,13 @@ from tacex_assets.robots.franka.franka_gf225_gripper_uipc import (
 from isaaclab.utils import configclass
 from isaaclab.assets import ArticulationCfg
 from ..sensors.tactile import TactileCfg, create_tactile_cfg
+from ..sensors.camera import RigidCameraMountCfg
 
 @configclass
 class RobotCfg:
     robot: ArticulationCfg = None
     tactiles: list[TactileCfg] = []
+    rigid_camera_mount: RigidCameraMountCfg | None = None
 
     gripper_offset: float = 0.131 # in m
     gripper_max_qpos: float = 0.039 # in m
@@ -65,7 +67,19 @@ def create_franka_gsmini_gripper(data_type:list[str]):
         gripper_max_qpos=0.039,
         tactile_far_plane=34.0,
         adaptive_grasp_depth_threshold=27.5,
-        contact_threshold=(27.5, 28.0)
+        contact_threshold=(27.5, 28.0),
+        rigid_camera_mount=RigidCameraMountCfg(
+            camera_prim_path="/World/envs/env_.*/Robot/WristCamera/Camera",
+            mesh_prim_path="/World/envs/env_.*/Robot/WristCamera/mesh",
+            camera_translation=(0.0764461001, 0.0532088981, 0.0646707931),
+            camera_orientation_wxyz=(
+                0.21315141, -0.037584346, -0.16953202, 0.96146387
+            ),
+            mesh_translation=(-0.0313688122, -0.0268460897, 0.0219919422),
+            mesh_orientation_wxyz=(
+                0.5850807, 0.80764776, -0.05189237, 0.05189237
+            ),
+        ),
     )
 
 def create_franka_gf225_gripper(data_type:list[str]):
