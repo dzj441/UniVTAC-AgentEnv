@@ -121,7 +121,9 @@ PublicObservationFrame
 
 `start_episode` returns `obs_000`. Every accepted `step_eef` returns a fresh
 observation. `finish_episode` may return a final post-settle observation and is
-the only response allowed to reveal terminal success.
+the only response allowed to reveal terminal success. Its Agent-visible result
+contains the official success bit but not evaluator/checker diagnostics; detailed
+terminal checks remain evaluator-private.
 
 Current state, calibration, annotations, and relative artifact references are
 included in the JSON tool result. Current visual modalities are also sent as

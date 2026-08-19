@@ -473,6 +473,8 @@ class BenchmarkCapabilityGateway:
                 )
             if not terminal and {"task_success", "official_task_success"} & set(value):
                 raise CapabilityViolation("Task success leaked before finish_episode")
+            if not terminal and "evaluator_checks" in value:
+                raise CapabilityViolation("Evaluator checks leaked before finish_episode")
             for child in value.values():
                 visit(child)
 
@@ -620,7 +622,19 @@ class BenchmarkCapabilityGateway:
                 seen.add(path)
             return output
 
-        return visit(response), images
+        # The simulator's terminal response doubles as the evaluator record, so it
+        # intentionally contains detailed checker diagnostics.  Those diagnostics
+        # remain available through ``raw_response`` and evaluator-private files but
+        # are not part of the Agent contract: only the official terminal success bit
+        # is public.
+        public_source = response
+        if response.get("status") == "rollout_finished":
+            public_source = {
+                key: value
+                for key, value in response.items()
+                if key != "evaluator_checks"
+            }
+        return visit(public_source), images
 
     def _update_state(self, response: JsonDict) -> None:
         observation = response.get("observation")

@@ -376,6 +376,56 @@ def test_gateway_strips_paths_attaches_images_and_hides_success(tmp_path: Path) 
         )
 
 
+def test_gateway_keeps_terminal_checker_details_private(tmp_path: Path) -> None:
+    responses = iter(
+        [
+            {
+                "status": "rollout_started",
+                "observation": {
+                    "observation_id": "obs_000",
+                    "modalities": {},
+                    "robot_state": {},
+                },
+            },
+            {
+                "status": "rollout_finished",
+                "official_task_success": True,
+                "evaluator_checks": {
+                    "base_task_success": True,
+                    "settle_steps": 60,
+                    "private_threshold_m": 0.01,
+                },
+                "observation": {
+                    "observation_id": "obs_001",
+                    "modalities": {},
+                    "robot_state": {},
+                },
+            },
+        ]
+    )
+    gateway = BenchmarkCapabilityGateway(
+        task=get_benchmark_task("pull_out_key"),
+        profile=get_observation_profile(1),
+        annotations=AnnotationCapabilities(),
+        simulator_request=lambda _: next(responses),
+        simulator_run_dir=tmp_path,
+    )
+    gateway.execute("start_episode", {"agent_note": "test terminal projection"})
+    finished = gateway.execute(
+        "finish_episode",
+        {
+            "observation_id": "obs_000",
+            "final_note": "Request terminal evaluation.",
+            "decision_record": decision(),
+        },
+    )
+
+    assert finished.raw_response["evaluator_checks"]["settle_steps"] == 60
+    assert finished.public_response["official_task_success"] is True
+    assert "evaluator_checks" not in finished.public_response
+    assert "private_threshold_m" not in str(finished.content_items)
+
+
 def test_gateway_publishes_only_current_metric_depth_and_raw_masks(
     tmp_path: Path,
 ) -> None:
