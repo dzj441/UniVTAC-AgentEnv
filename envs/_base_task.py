@@ -863,7 +863,7 @@ class BaseTask(UipcRLEnv):
         '''
             qpos     : actions is Tensor([8]), qpos (7 DOFS + gripper)
             ee       : actions is Tensor([7]), position (3), orientation (4)
-            delta_ee : actions is Tensor([6]), delta_position (3), delta_orientation (3)
+            delta_ee : actions is Tensor([7]), delta_position (3), delta_orientation (3), gripper (1)
         '''
         if self.take_action_cnt >= self.cfg.step_lim or self.eval_success:
             return True, self.eval_success
@@ -880,8 +880,16 @@ class BaseTask(UipcRLEnv):
             ], delay=False)
         elif action_type == 'delta_ee':
             ee_pose = self._robot_manager.get_ee_pose()
-            ee_next_pose = ee_pose.add_bias(action[:3], coord='world')\
-                .add_rotation(euler=action[3:6].tolist(), coord='world')
+            # agentic team comment: Keep world XYZ and world RPY deltas
+            # agentic team comment: independent; legacy add_rotation(world)
+            # agentic team comment: also orbits position about the world origin.
+            ee_next_pose = (
+                ee_pose.add_bias(action[:3], coord='world')
+                .add_orientation_delta(
+                    euler=action[3:6].tolist(),
+                    frame='world',
+                )
+            )
             gripper_pos = self._robot_manager.get_gripper_qpos()
             gripper_next_pos = gripper_pos + action[6]
             exec_success = self.move([

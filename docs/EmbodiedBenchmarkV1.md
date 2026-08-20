@@ -111,26 +111,27 @@ Bottle 的 release 阈值为 gripper qpos `>= 0.0175 m`；稳定要求 60 steps 
 未知字段、非有限数和越界动作在改变世界之前被拒绝。接口不返回目标方向、目标半空间、
 语义动作提示、actor pose、IK/joint target 或过程 task success。
 
-### 已知的 legacy EEF 旋转语义缺陷
+### StepEEF 世界旋转与 legacy Pose 旋转
 
-截至 2026-08-20，当前实现尚未完全满足上面的独立 XYZ/RPY 增量契约。
+`8ccafe0` 及以前的 `delta_ee` 实现尚未满足上面的独立 XYZ/RPY 增量契约。
 `BaseTask.take_action(..., action_type="delta_ee")` 先对当前位置加平移，再调用
 `Pose.add_rotation(..., coord="world")`。后者不仅左乘姿态，还对绝对位置应用同一个
-旋转矩阵。因此当前实际目标为：
+旋转矩阵。因此 legacy 实际目标为：
 
 ```text
 p_target = R_delta @ (p_current + delta_p)
 q_target = q_delta * q_current
 ```
 
-契约期望的语义则是：
+当前 `step_eef` 改为先调用 `add_bias(..., coord="world")`，再调用 orientation-only 的
+`add_orientation_delta(..., frame="world")`，从而实现契约要求的语义：
 
 ```text
 p_target = p_current + delta_p
 q_target = q_delta * q_current
 ```
 
-所以即使 `delta_p == 0`，非零 `delta_rpy` 也会使 EEF 目标绕世界原点发生平移，表现为
+在 legacy 语义下，即使 `delta_p == 0`，非零 `delta_rpy` 也会使 EEF 目标绕世界原点发生平移，表现为
 “公转”，而不是保持工具中心点不动的原地旋转。该行为来自 UniVTAC 初始提交
 `b371b18` 中的 `envs/_base_task.py` 与 `envs/utils/transforms.py`；AgentEnv 只是把已有的
 `delta_ee` 路径暴露为 `step_eef`，cuRobo 则规划到已经发生偏移的目标，因此两者都不是
@@ -141,6 +142,13 @@ q_target = q_delta * q_current
 讨论的是保存的绝对 EEF label 被再次规划而产生绕行，是相邻但不同的问题；它没有指出
 `delta_rpy` 会通过 `R_delta @ p` 改变位置。
 
+修复没有改变通用 `Pose.add_rotation()` 的 legacy 行为：`coord="world"` 仍表示绕世界
+原点旋转整个 Pose；传入具体 `Pose` 仍可用于绕指定支点运动。当前 tracked codebase 中，
+曾将 `add_rotation(..., coord="world")` 用于 orientation-only 控制的调用只有 `delta_ee`。
+默认 `local` 分支的历史四元数组合语义也暂不改变，避免影响 scripted expert 与任务初始化；
+新的 `add_orientation_delta()` 则明确规定 world frame 左乘、local frame 右乘，且两者都不
+改变 position。
+
 该缺陷不要求重新采集当前 fixed-expert 数据。正式专家 HDF5 保存的是 scripted
 expert/cuRobo 产生的状态轨迹，派生 P6 master 也通过 `qpos` replay 采集 observation；二者
 都不包含或执行 `step_eef` action。修复后应对原 frozen HDF5、P6 master 和终局 checker
@@ -149,9 +157,12 @@ expert/cuRobo 产生的状态轨迹，派生 P6 master 也通过 `qpos` replay �
 应重新评测。任何未来若保存了 `delta_ee` action 的数据集也必须重新生成，或显式标为
 legacy semantics。
 
-修复时优先只改 `delta_ee` 的目标构造，并增加“纯旋转不改变目标位置”的回归测试；若
-选择全局修改 `Pose.add_rotation(coord="world")`，则还必须审计所有其他调用方，避免改变
-scripted expert 的既有运动语义。
+静态验收覆盖：纯旋转不改变位置、平移与旋转解耦、world 左乘与 local 右乘不交换，以及
+legacy `add_rotation(coord="world")` 仍保留绕原点旋转位置的行为。真实仿真验收使用
+`delta_position=[0,0,0]`、`delta_rpy=[0,0,0.1]`。同一任务与 seed 下，修复前该命令产生
+`49.28 mm` 平移；修复后的 `eef_yaw_semantics_fixed_seed_1938475621` 在 action complete 时
+仅平移 `0.0813 mm`，实际姿态增量为 `0.10015 rad`，60-step settle 后相对初始位置仍只偏移
+`0.1661 mm`。这表明剩余位移属于规划与控制跟踪误差，而非目标构造中的世界原点公转。
 
 ## 启动环境
 

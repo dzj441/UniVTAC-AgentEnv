@@ -121,7 +121,31 @@ class Pose:
         else:
             self.p += vec
             return self
-    
+
+    def add_orientation_delta(
+        self,
+        euler,
+        frame: Literal['world', 'local'] = 'world',
+        clone=True,
+    ):
+        """Apply an Euler orientation delta without changing position."""
+
+        delta_rotation = t3d.euler.euler2quat(*euler)
+        if frame == 'world':
+            new_q = t3d.quaternions.qmult(delta_rotation, self.q)
+        elif frame == 'local':
+            new_q = t3d.quaternions.qmult(self.q, delta_rotation)
+        else:
+            raise ValueError(f"Unsupported orientation-delta frame: {frame!r}")
+
+        if clone:
+            return Pose(self.p, new_q)
+        self.q = new_q
+        return self
+
+    # agentic team comment: Preserve this helper's legacy full-Pose rotation
+    # agentic team comment: semantics; orientation-only control must use
+    # agentic team comment: add_orientation_delta instead.
     def add_rotation(self, euler, coord:Literal['world', 'local']|'Pose'='local', clone=True):
         new_rotation = t3d.euler.euler2quat(*euler)
         if isinstance(coord, Pose):
