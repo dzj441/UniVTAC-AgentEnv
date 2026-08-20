@@ -178,7 +178,7 @@ class CodexAppServerClient:
         gateway: CapabilityGateway,
         model: str | None,
         base_instructions: str,
-        developer_instructions: str,
+        developer_instructions: str | None,
         sandbox: str = "read-only",
     ) -> dict[str, Any]:
         params: dict[str, Any] = {
@@ -189,10 +189,11 @@ class CodexAppServerClient:
             "experimentalRawEvents": False,
             "dynamicTools": gateway.dynamic_tools(),
             "baseInstructions": base_instructions,
-            "developerInstructions": developer_instructions,
             "runtimeWorkspaceRoots": [str(self.cwd)],
             "serviceName": "univtac-agentenv",
         }
+        if developer_instructions:
+            params["developerInstructions"] = developer_instructions
         if self.enforce_embodied_only:
             params["environments"] = []
         if model:
@@ -259,6 +260,7 @@ class CodexAppServerClient:
         start_response: dict[str, Any] | None = None
         terminal_notification: dict[str, Any] | None = None
         dynamic_tool_call_count = 0
+        suppressed_dynamic_tool_call_count = 0
         interrupt_requested = False
         last_dynamic_tool: str | None = None
         deferred_input_items: list[dict[str, Any]] | None = None
@@ -284,19 +286,13 @@ class CodexAppServerClient:
                 self.turn_id = message_params["turnId"]
             if method == "item/tool/call":
                 if interrupt_after_dynamic_tool and dynamic_tool_call_count:
-                    self._fail_capability(
-                        reason="multiple_embodied_tools_in_action_turn",
-                        evidence={
-                            "turn_id": self.turn_id,
-                            "first_tool": last_dynamic_tool,
-                            "additional_tool": message_params.get("tool")
-                            if isinstance(message_params, dict)
-                            else None,
-                        },
+                    self._reject_queued_dynamic_tool(
+                        message,
+                        gateway,
+                        first_tool=last_dynamic_tool,
                     )
-                    raise CapabilityViolation(
-                        "action-per-turn mode received more than one embodied tool call"
-                    )
+                    suppressed_dynamic_tool_call_count += 1
+                    continue
                 execution = self._handle_dynamic_tool(
                     message,
                     gateway,
@@ -407,6 +403,9 @@ class CodexAppServerClient:
             "gateway_terminal": gateway.terminal,
             "capability_violation": self.capability_violation,
             "dynamic_tool_call_count": dynamic_tool_call_count,
+            "suppressed_dynamic_tool_call_count": (
+                suppressed_dynamic_tool_call_count
+            ),
             "last_dynamic_tool": last_dynamic_tool,
             "interrupted_after_dynamic_tool": interrupt_requested,
             "deferred_input_items": deferred_input_items,
@@ -547,6 +546,79 @@ class CodexAppServerClient:
             }
         )
         return execution
+
+    def _reject_queued_dynamic_tool(
+        self,
+        message: dict[str, Any],
+        gateway: CapabilityGateway,
+        *,
+        first_tool: str | None,
+    ) -> None:
+        """Reject a batched call that arrived after this turn's accepted action."""
+
+        request_id = message.get("id")
+        params = message.get("params", {})
+        if not isinstance(params, dict):
+            raise CodexAppServerError("item/tool/call params must be an object")
+        tool = str(params.get("tool"))
+        arguments = params.get("arguments")
+        call_id = str(params.get("callId"))
+        requested_observation_id = (
+            arguments.get("observation_id")
+            if isinstance(arguments, dict)
+            and isinstance(arguments.get("observation_id"), str)
+            else None
+        )
+        latest_observation_id = getattr(gateway, "latest_observation_id", None)
+        public = {
+            "status": "tool_rejected",
+            "tool": tool,
+            "message": "Tool call rejected by the environment contract.",
+        }
+        execution = GatewayExecution(
+            tool=tool,
+            success=False,
+            execution_target="rejected",
+            simulator_command=None,
+            backend_request=None,
+            raw_response={
+                "status": "tool_rejected",
+                "tool": tool,
+                "reason": "additional_action_after_turn_boundary",
+                "first_tool": first_tool,
+                "requested_observation_id": requested_observation_id,
+                "latest_observation_id": latest_observation_id,
+            },
+            public_response=public,
+            content_items=(
+                {
+                    "type": "inputText",
+                    "text": json.dumps(public, ensure_ascii=False),
+                },
+            ),
+            decision_record=None,
+            prior_observation_id=requested_observation_id,
+            next_observation_id=(
+                latest_observation_id
+                if isinstance(latest_observation_id, str)
+                else requested_observation_id
+            ),
+        )
+        self._record_execution(
+            execution,
+            call_id=call_id,
+            arguments=arguments,
+            duration_seconds=0.0,
+        )
+        self._send(
+            {
+                "id": request_id,
+                "result": {
+                    "success": False,
+                    "contentItems": list(execution.content_items),
+                },
+            }
+        )
 
     def _record_execution(
         self,

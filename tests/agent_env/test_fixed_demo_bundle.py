@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import h5py
@@ -311,6 +312,47 @@ def test_projection_authenticates_registry_manifest(
             profile=get_observation_profile(1),
             annotations=AnnotationCapabilities(),
             asset_spec=bad_spec,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("legacy_schema", "missing_depth_policy", "integer_depth_policy"),
+)
+def test_projection_rejects_master_without_v3_depth_contract(
+    tmp_path: Path,
+    synthetic_master: tuple[Path, FixedDemoAssetSpec],
+    mutation: str,
+) -> None:
+    source_root, source_spec = synthetic_master
+    asset_root = tmp_path / "asset_root"
+    shutil.copytree(source_root, asset_root)
+    manifest_path = asset_root / source_spec.manifest_relative_path
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if mutation == "legacy_schema":
+        manifest["schema_version"] = "univtac.fixed_expert_p6_master.v2"
+    elif mutation == "missing_depth_policy":
+        del manifest["capture"]["wrist_metric_depth_surface_policy"]
+    else:
+        policy = manifest["capture"]["wrist_metric_depth_surface_policy"]
+        policy["rigid_gripper_and_gelsight_housing_included"] = 1
+        policy["deformable_optical_gel_surface_included"] = 0
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    spec = FixedDemoAssetSpec(
+        task=source_spec.task,
+        seed=source_spec.seed,
+        manifest_relative_path=source_spec.manifest_relative_path,
+        manifest_sha256=file_sha256(manifest_path),
+    )
+
+    with pytest.raises(FixedDemoBundleError, match="v3 P6|wrist-depth"):
+        project_fixed_demo_bundle(
+            asset_root=asset_root,
+            destination=tmp_path / "expert_demo",
+            task="pull_out_key",
+            profile=get_observation_profile(6),
+            annotations=AnnotationCapabilities(),
+            asset_spec=spec,
         )
 
 

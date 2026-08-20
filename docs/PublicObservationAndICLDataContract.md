@@ -34,6 +34,16 @@ reproducibility. Workspace isolation and Agent capability restriction are
 separate concerns: the former may be enabled without replacing or disabling
 the evaluator's normal Agent configuration.
 
+The current reference host cannot use Codex's bubblewrap-based
+`workspace-write` sandbox reliably, so the reference runner temporarily
+defaults to `danger-full-access`. In this mode the temporary workspace is a
+data-layout boundary, not containment, and Codex permits network access.
+UniVTAC records both the requested and effective network setting together with
+the declared sandbox and native App Server activity, but does not reject general
+Agent activity as hacking; containment and adjudication belong to the
+evaluator. Restoring a validated bubblewrap/`workspace-write` deployment is a
+runtime TODO, not a benchmark data-contract prerequisite.
+
 ## Three data planes
 
 ### Internal expert observation master
@@ -202,68 +212,53 @@ Large numeric depth arrays are never embedded in JSON. Artifact metadata
 records relative path, SHA-256, media type, dtype, shape, unit, validity rule,
 and visualization range as applicable.
 
-### Known wrist-depth limitation: deformable GelSight pads
+### GelSight wrist-depth surface policy
 
-As of 2026-08-20, P5/P6 wrist depth has a known simulator-rendering
-limitation around the deformable GelSight pads. In the reviewed
-`pull_out_key` P6 rollout (`07_key_p6`), the gripper remained closed according
-to both finger joints and `gripper_width_m`, and RGB/depth landmarks from the
-rigid scene remained synchronized. However, pixels occupied by the black
-GelSight pads in wrist RGB returned the depth of geometry behind the pads in
-`depth_m.npy`. After the key was lifted, this made the depth preview resemble
-an open gripper even though the pads were still closed on the key.
+The public P5/P6 contract is:
 
-The clearest retained regression anchor is
-`formal16_b21184e_seed_1830315042/07_key_p6/obs_012`. In wrist RGB, the two
-black pad regions occupy approximately `x=215--230` and `x=254--272`. Their
-corresponding raw-depth medians are about `0.266 m`, while the same pad-shaped
-regions before the lift in `obs_009` are about `0.124 m`. The rigid gripper
-cases, key, and fixture remain spatially aligned across RGB and depth. This
-isolates the discrepancy to the gelpad regions and establishes that it exists
-in `depth_m.npy`, not only in the colorized preview.
+> Wrist metric depth includes the rigid gripper and GelSight housing, but
+> excludes the deformable optical gel surface.
 
-The initial frames can look correct by coincidence: the fixture or key behind
-the pads is at a similar range, and the preview is independently normalized
-per frame using its 1st and 99th depth percentiles. Once the gripper moves away
-from the fixture, the background becomes farther and the see-through region is
-visually obvious. This is not evidence of a stale RGB/depth pair or an open
-command.
+The TacEx GelSight Mini asset authors
+`primvars:invisibleToSecondaryRays=true` on both the rigid `case`/`plate`
+meshes and the deformable gelpad meshes. Leaving all six meshes hidden makes
+the wrist depth annotator see through mechanically rigid parts of the gripper.
+UniVTAC therefore applies a runtime USD session-layer override after scene
+cloning and before sensor initialization or the first reset/render:
 
-A source-history audit rules out the AgentEnv serializer as the origin of the
-metric values. The public P5/P6 path copies
-`camera.data.output["depth"]` into `depth_m.npy` after only removing singleton
-camera dimensions and casting to `float32`. Wrist `TiledCamera` depth capture,
-the UIPC render-mesh update, and their update order have existed since the
-initial UniVTAC commit `b371b18`; the later camera-mount commit `c0e6a64` only
-changed the camera and visible housing poses. It can make the pads easier to
-see, but it did not change the depth annotator or deformable mesh path.
+- the four left/right rigid `case/mesh` and `plate/mesh` prims are set to
+  `false`, so they participate in metric depth;
+- the two deformable `gelpad_*/mesh` prims are explicitly kept `true`.
 
-The strongest current attribution is therefore the TacEx/UIPC--Isaac
-Sim/Fabric--IsaacLab `TiledCamera` integration boundary, rather than the
-benchmark exporter. TacEx updates each deformable surface by writing its point
-array into a Fabric mesh. Its
-[upstream implementation](https://github.com/DH-Ng/TacEx/blob/main/source/tacex_uipc/tacex_uipc/sim/uipc_sim.py#L268-L284)
-explicitly documents a one-frame rendering delay and performs an extra render
-only to "somewhat mitigate" it. A 2026-08-20 audit of all open and closed
-UniVTAC and TacEx GitHub issues found no exact report of RGB-visible gelpads
-being absent from metric depth. Related IsaacLab reports do establish that
-TiledCamera/Fabric can expose
-stale or missing dynamic geometry, including
-[a wrist TiledCamera that did not follow its robot](https://github.com/isaac-sim/IsaacLab/issues/745)
-and [renderer-side omission of dynamically driven links](https://github.com/isaac-sim/IsaacLab/issues/6625),
-but neither is an exact reproduction of this gelpad-depth failure. The precise
-owning component remains unproven until a minimal UIPC pad test compares
-`TiledCamera` with ordinary `Camera` and Fabric with a USD-synchronized path.
+The override resolves roots from the configured GelSight sensor and gelpad
+paths, validates exact child paths and expected per-environment counts, and
+fails closed for inactive, unloaded, non-Mesh, instance-proxy, prototype, or
+wrong-typed targets. It is authored only in the stage session layer; the
+vendored TacEx USD remains unchanged.
 
-This limitation is currently deferred rather than silently corrected. Before
-depth-sensitive benchmark conclusions are frozen, a focused simulator probe
-should determine whether the UIPC gelpad render mesh is omitted by the camera
-depth annotator. Candidate resolutions are to make that mesh participate in
-metric depth, or to mark affected pixels invalid with an explicit confidence
-mask. A fixed wrist-preview display range may improve temporal readability but
-does not repair the underlying metric-depth inconsistency. Add a regression in
-which a closed gripper is moved through free space and its pad depth remains
-constant in the wrist-camera frame.
+This split is deliberate. A same-state closed-key A/B probe recovered 9,979
+nearer wrist-depth pixels when only the rigid housing became visible, with a
+median recovered surface-distance difference of about `0.03459 m`. Both
+GelSight sensors' `camera_depth`, `height_map`, `tactile_rgb`, and
+`marker_motion` remained elementwise identical. In contrast, making the
+deformable pad visible changed every pixel in the tactile height map by about
+`6.6 mm`, because the same deformable optical surface participates in the
+internal GelSight rendering pipeline. UniVTAC consequently does not claim
+pixelwise RGB/depth agreement on that optical gel surface.
+
+The pre-fix Formal16 rollout remains a useful historical regression anchor at
+`formal16_b21184e_seed_1830315042/07_key_p6/obs_012`: it shows the larger hole
+created when the rigid housing was also hidden. Initial frames may conceal the
+problem because nearby background geometry has a similar range and each depth
+preview is normalized independently. The metric `.npy` data, rather than only
+the colorized preview, is authoritative.
+
+The public serializer itself does not alter metric values: it copies
+`camera.data.output["depth"]`, removes singleton camera dimensions, and casts
+to `float32`. P5/P6 observations or expert masters captured before the runtime
+override retain the legacy rendering and must be replayed/exported before use
+in depth-sensitive comparisons. Their authenticated expert motion and success
+proof do not need to be recollected.
 
 ## Profile projection
 
@@ -398,7 +393,11 @@ discoverability notice. It is incompatible with `--pre-move` because the
 registered demonstrations begin ungrasped. The operator prompt otherwise contains
 only the task instruction; the ICL condition adds one sentence naming
 `benchmark_inputs/expert_demo/`. Tool lifecycle semantics live in the static base
-instruction and tool descriptions, not in task-specific strategy text.
+instruction and tool descriptions, not in task-specific strategy text. The
+UniVTAC base instruction contains only the three-tool lifecycle and terminal
+success visibility. It also states the transport invariant that the Agent must
+wait for a robot call's resulting observation before issuing another robot
+call. The runner sends no additional UniVTAC developer instruction.
 
 The fixed demonstration's private collection seed is also excluded from the
 same-task evaluation condition. Default evaluator seeds already come from a
@@ -450,25 +449,29 @@ A release is valid only if automated checks establish all of the following:
 | Area | Current status | Required change |
 | --- | --- | --- |
 | P1--P6 live sensing | Implemented | Preserve behavior |
-| live JSON and image delivery | Current JSON and display images are sent directly | Preserve Profile filtering |
+| live JSON and image delivery | Current JSON and display images are sent directly; every image is announced with its complete public JSON field path | Preserve Profile filtering and semantic labels |
 | live filesystem recording | Private per-frame JSON/PNG/NPY plus current-only Agent artifacts implemented | Preserve replacement and hash checks |
 | live state | Inlined in every tool result | Preserve; do not publish an Agent-visible online state history |
 | live calibration | Inlined in every applicable tool result | Preserve; keep any calibration history private |
 | live annotations | Initial-only schedule and current-file replacement tested | Add real-run regression when simulator testing is available |
 | annotation masks | Single-channel binary PNG implemented | Preserve exact mode/value checks |
 | bbox display | Initial overlay is marked as transportable image content | Preserve initial-only transport |
-| expert P6 master | Complete P6 plus initial head/wrist bbox/mask | Treat v2 `expert_observation_master/` assets as the projection source |
+| expert P6 master | Complete P6 plus initial head/wrist bbox/mask and authenticated wrist-depth policy | Treat suffixed v3 `expert_observation_master/` assets as the projection source |
 | expert action semantics | Correctly marked as observation waypoints | Preserve; do not add `step_eef` conversion |
 | static ICL bundle | Implemented with exact validation and atomic publication | Freeze schema only after rollout review |
 | new expert collection | Historical source is RGB-focused | Record maximal P6 and initial annotation directly |
 | independent replay | P6 migration mode exists | Make maximal observation recording a normal replay product |
-| Codex general capabilities | Generic v1 runner inherits evaluator configuration and does not disable built-ins | Keep runtime policy evaluator-controlled and recorded |
+| Codex general capabilities | Generic v1 runner inherits evaluator configuration and does not disable built-ins; general activity is audited rather than prohibited by the benchmark | Keep runtime policy evaluator-controlled and recorded |
+| Codex sandbox | Reference runner defaults to `danger-full-access` because the current host's bubblewrap path is unavailable | TODO: install and validate bubblewrap before treating `workspace-write` as a supported containment mode |
+| tool rejection feedback | Public rejection text is intentionally generic | TODO: expose safe, non-leaking error categories without checker, planner, or private-state details |
 | Codex action narration | `rationale`, `decision_record`, `agent_note`, and `final_note` removed from generic v1 tools | Record native App Server activity instead of forcing duplicate prose |
 
-The two existing replay-proven demonstrations have v2 maximal masters with the
-initial annotation source. Their 48 public projections have been validated.
-The remaining production data work is to make maximal P6 plus initial
-annotations a normal output of collection and replay for future assets.
+The two replay-proven demonstrations now have v3 maximal masters with the
+initial annotation source and the rigid-housing/deformable-gel depth contract.
+Their 48 public projections have been validated. Unsuffixed v2 assets retain
+the pre-fix wrist-depth rendering only as regression evidence. The remaining
+production data work is to make maximal P6 plus initial annotations a normal
+output of collection and replay for future assets.
 
 ## Recommended work split
 
@@ -479,5 +482,6 @@ independently:
    review demonstration usability;
 2. collection/replay path: make maximal P6 plus initial annotation a normal
    product of both stages and remove the extra migration pass for new assets;
-3. runtime path: retain the implemented clean temporary workspace and
-   current-only file publication while extending real-run acceptance coverage.
+3. runtime path: retain the implemented clean temporary workspace for data
+   separation and current-only file publication, validate bubblewrap as a
+   future optional containment mode, and extend real-run acceptance coverage.

@@ -34,6 +34,11 @@ PNG 预览。相机外参是 `T_robot_base_camera_ros` 4×4 矩阵，ROS optical
 `+Z forward, -Y up`。Codex 适配器把可视 PNG 作为图像输入，并在结构化响应中保留米制
 artifact、统计、内参与外参；其他模型适配器可直接消费无损数组。
 
+Wrist metric depth 包含刚性夹爪和 GelSight housing，但不包含可变形 optical gel
+surface。UniVTAC 在 runtime USD session layer 中只恢复左右 `case/plate` 的
+secondary-ray visibility，并明确保持 gelpad 隐藏；这既修复刚性夹爪在 depth 中的空洞，
+也避免改变 GelSight 内部触觉渲染。该策略由真实 closed-key A/B 回归验证。
+
 ## 匿名标注诊断轴
 
 命令行的两个开关完全独立，可组成四种条件：
@@ -247,26 +252,41 @@ UNIVTAC_FIXED_EXPERT_MASTER_ROOT=/path/to/expert_observation_master \
   --provide-bbox --provide-mask \
   --icl fixed_demo \
   --interaction-mode action_per_turn \
-  --codex-sandbox workspace-write \
+  --codex-sandbox danger-full-access \
   --run-dir agent_runs/pull_key_p6_fixed_demo
 ```
 
 Generic v1 runner 为每次 rollout 创建干净的临时 workspace，但继承评测方的正常
 `CODEX_HOME` 配置，也不再通过启动参数禁用 shell、文件、`view_image`、MCP/app、skill、
-subagent 等通用能力。默认保留 `workspace-write` 临时 workspace 隔离并允许网络；评测方可
-用 `--codex-sandbox`、`--no-codex-network-access` 或显式
-`--codex-network-access` 覆盖并把条件写入 manifest。Benchmark core 不把通用工具使用判为
-capability violation。`danger-full-access` 本身不施加 Codex 网络 sandbox。机器人控制仍只能经过
+subagent 等通用能力。由于当前 reference host 的 bubblewrap 不可用，runner 当前默认使用
+`danger-full-access` 并允许网络；评测方仍可改用 `--codex-sandbox`，并在
+`read-only`/`workspace-write` 模式下用 `--no-codex-network-access` 或显式
+`--codex-network-access` 控制网络。`danger-full-access` 始终允许网络。请求值与实际生效值
+都会写入 manifest。临时 workspace 此时只负责运行数据组织与跨 episode 分离，不构成安全边界。
+Benchmark core 不把 shell、网络、插件或其他通用工具使用判为 capability violation；这些
+行为由 App Server 原始事件流审计，是否属于 hacking 由评测方判断。机器人控制仍只能经过
 `start_episode`、`step_eef`、`finish_episode` 三个 host 校验的 dynamic tools，通用工具
 不会获得第二条仿真控制通路。
 
+TODO：安装并验证可工作的 bubblewrap 后，再恢复 `workspace-write` 作为可选的 reference
+sandbox 模式；这不会改变 Benchmark core 的 observation-contract 责任边界。另一个独立
+TODO 是把当前笼统的 tool rejection 文本升级为安全、非泄漏的错误类别，帮助 Agent 自我
+修复参数错误。
+
 Operator prompt 默认只包含当前 task instruction；`icl=fixed_demo` 时额外增加一句已验证
 示范目录提示，配置显式 token budget 时才再增加预算声明。非策略性的三工具生命周期和
-task-success 终局可见性放在 base instruction/tool description 中。prompt 不再要求 Agent
+task-success 终局可见性放在 base instruction/tool description 中。当前 UniVTAC base
+instruction 仅说明三工具生命周期、每次机器人调用后等待其结果 observation，再进行下一次
+机器人调用，以及 success 只由 `finish_episode` 返回；不再发送额外的 UniVTAC developer
+instruction。
+prompt 不再要求 Agent
 “只能使用本 run 信息”，也不要求结构化 rationale。Reference runner 默认使用
 `action_per_turn`；`single_turn` 仅保留为显式兼容/诊断选项。
 
-在线 RGB、触觉、depth preview 与首帧 annotation overlay 由 Agent transport 主动发送。
+在线 RGB、触觉、depth preview 与首帧 annotation overlay 由 Agent transport 主动发送；
+每张图前的标签使用完整公开 JSON 字段路径（例如
+`observation.modalities.wrist_depth.visualization`），避免重复的 `valid_mask` 或
+`bbox_overlay` 名称失去视角和语义角色。
 无法作为 image content 传输的米制 `.npy` depth 与 raw mask 只发布到
 `benchmark_inputs/current_observation/`，每个新 observation 原子替换前一帧，不提供自动
 历史。完整在线轨迹仍仅保存在 evaluator-private run directory；Agent 如需历史应自行保存。
@@ -283,8 +303,11 @@ Codex 在整个 episode 中始终使用一个连续 thread。Runner 支持两种
 
 `action_per_turn` 不创建新 session、thread 或 simulator episode，也不改变 50-step 动作
 预算；它只把 observation/action 的环境边界映射为自然的对话 turn 边界。每个 turn 在
-机器人动作前仍可使用 evaluator 允许的 shell、图片、MCP 等通用能力。所有已发布
-reasoning summary、agent message、shell/文件/MCP/子 Agent/网络/图像活动、tool call、
+机器人动作前仍可使用 evaluator 允许的 shell、图片、MCP 等通用能力。
+如果模型在 interrupt 生效前已批量生成额外机器人 tool call，host 只执行该 turn 的第一项，
+其余调用以普通 `tool_rejected` 记录并返回，随后仍用第一项动作产生的真实 observation 开启
+下一 turn；这种 transport race 不再被误判为 capability violation。
+所有已发布 reasoning summary、agent message、shell/文件/MCP/子 Agent/网络/图像活动、tool call、
 环境响应和 observation 都落盘。Viewer 直接从 App Server 事件流重建完整可观察活动；新
 v1 run 不生成结构化 decision stream，旧 run 的 decision record 仅作为历史兼容产物。隐藏 chain-of-thought 不在 Codex
 协议中公开。旧 v0 `grasp_classify` runner 仍保持自身的严格隔离策略，见
@@ -333,8 +356,10 @@ Codex run 还包含 `codex_app_server_events.jsonl`、`codex_messages.jsonl`、
 `icl_projection_receipt.json`，用于认证所用 master 与 public bundle 哈希；该 receipt 不会
 放入 Agent workspace。运行 manifest 同时记录 ICL 条件、通用 capability 策略、sandbox、
 网络条件，以及严格固定的三项机器人控制工具。
-Base、developer 与 task/operator 三层指令分别落盘并在 manifest 中记录 SHA-256；完整
-dynamic-tool schema 单独保存在 `codex_capabilities.json`。
+Base 与 task/operator 两层 UniVTAC 指令分别落盘并在 manifest 中记录 SHA-256；新 run 的
+developer-instruction manifest 字段为 `null`，且 `thread/start` 不发送
+`developerInstructions`。完整 dynamic-tool schema 单独保存在
+`codex_capabilities.json`。
 这些内容可用只读 Viewer 复盘：
 
 ```bash

@@ -204,6 +204,7 @@ assert receive()["method"] == "initialized"
 thread = receive()
 assert thread["method"] == "thread/start"
 assert "environments" not in thread["params"]
+assert "developerInstructions" not in thread["params"]
 assert thread["params"]["sandbox"] == "workspace-write"
 send({"id": thread["id"], "result": {"thread": {"id": "thread-general"}}})
 turn = receive()
@@ -319,6 +320,18 @@ assert json.loads(commit_result["result"]["contentItems"][0]["text"]) == {
 }
 interrupt_two = receive()
 assert interrupt_two["method"] == "turn/interrupt"
+send({"id": 103, "method": "item/tool/call", "params": {
+    "threadId": "thread-multi", "turnId": "turn-two", "callId": "call-extra",
+    "tool": "commit_classification", "arguments": {},
+}})
+extra_result = receive()
+assert extra_result["id"] == 103
+assert extra_result["result"]["success"] is False
+assert json.loads(extra_result["result"]["contentItems"][0]["text"]) == {
+    "status": "tool_rejected",
+    "tool": "commit_classification",
+    "message": "Tool call rejected by the environment contract.",
+}
 send({"id": interrupt_two["id"], "result": {}})
 send({"method": "turn/completed", "params": {
     "threadId": "thread-multi",
@@ -430,7 +443,7 @@ def test_general_app_server_mode_inherits_environments_and_accepts_general_items
             gateway=gateway,
             model=None,
             base_instructions="Use public inputs.",
-            developer_instructions="Use dynamic tools for robot control.",
+            developer_instructions=None,
             sandbox="workspace-write",
         )
         result = client.run_turn(
@@ -506,6 +519,8 @@ def test_same_thread_accepts_multimodal_followup_turn_and_interrupts_after_tool(
     assert second["turn_id"] == "turn-two"
     assert first["dynamic_tool_call_count"] == 1
     assert second["dynamic_tool_call_count"] == 1
+    assert first["suppressed_dynamic_tool_call_count"] == 0
+    assert second["suppressed_dynamic_tool_call_count"] == 1
     assert first["last_dynamic_tool"] == "start_episode"
     assert second["last_dynamic_tool"] == "commit_classification"
     assert len(first["deferred_input_items"]) == 5
@@ -516,3 +531,14 @@ def test_same_thread_accepts_multimodal_followup_turn_and_interrupts_after_tool(
         "start",
         "submit_prediction",
     ]
+    tool_rows = [
+        json.loads(line)
+        for line in recorder.tool_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(tool_rows) == 3
+    assert tool_rows[-1]["tool"] == "commit_classification"
+    assert tool_rows[-1]["success"] is False
+    assert tool_rows[-1]["execution_target"] == "rejected"
+    assert tool_rows[-1]["host_response"]["reason"] == (
+        "additional_action_after_turn_boundary"
+    )

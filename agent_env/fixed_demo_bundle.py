@@ -29,7 +29,12 @@ from .benchmark_profiles import (
     get_observation_profile,
 )
 from .benchmark_tasks import get_benchmark_task
-from .p6_expert_master import P6_PROFILE, validate_p6_observation
+from .p6_expert_master import (
+    P6_MASTER_SCHEMA_VERSION,
+    P6_PROFILE,
+    WRIST_METRIC_DEPTH_SURFACE_POLICY,
+    validate_p6_observation,
+)
 
 
 FIXED_DEMO_ROOT_ENV = "UNIVTAC_FIXED_EXPERT_MASTER_ROOT"
@@ -56,19 +61,21 @@ _FIXED_DEMO_ASSETS = {
     "pull_out_key": FixedDemoAssetSpec(
         task="pull_out_key",
         seed=0,
-        manifest_relative_path="pull_out_key_seed_0/p6_master_manifest.json",
+        manifest_relative_path=(
+            "pull_out_key_seed_0_wrist_depth_v3/p6_master_manifest.json"
+        ),
         manifest_sha256=(
-            "31d3ca8bd720a94ace5f650bbe36826cb731cbb5e7b2fce35dd00938a5d998e0"
+            "ff48c0c2df6e75152960e2a78af30ba79b43aaf82905a04093c816b89918fc44"
         ),
     ),
     "put_bottle_in_shelf": FixedDemoAssetSpec(
         task="put_bottle_in_shelf",
         seed=1,
         manifest_relative_path=(
-            "put_bottle_in_shelf_seed_1/p6_master_manifest.json"
+            "put_bottle_in_shelf_seed_1_wrist_depth_v3/p6_master_manifest.json"
         ),
         manifest_sha256=(
-            "d699ccf0ed9a384496f17b2851e62d523fc2f3e758f2f1dc508eae34a7033b81"
+            "3e3af14ab0184a9fbfe20129e8ea765c3563dc8182bd8288f998e4a528919c96"
         ),
     ),
 }
@@ -530,8 +537,8 @@ def _authenticate_master(
     }
     if set(manifest) != required:
         raise FixedDemoBundleError("Fixed-demo P6 master top-level fields changed")
-    if manifest.get("schema_version") != "univtac.fixed_expert_p6_master.v2":
-        raise FixedDemoBundleError("Fixed-demo master must use the v2 P6 schema")
+    if manifest.get("schema_version") != P6_MASTER_SCHEMA_VERSION:
+        raise FixedDemoBundleError("Fixed-demo master must use the v3 P6 schema")
     if manifest.get("task") != spec.task or manifest.get("seed") != spec.seed:
         raise FixedDemoBundleError("Fixed-demo master task/seed registry mismatch")
     if (
@@ -555,6 +562,20 @@ def _authenticate_master(
         raise FixedDemoBundleError("Fixed-demo master capture metadata is missing")
     if capture.get("observation_profile") != P6_PROFILE.to_manifest():
         raise FixedDemoBundleError("Fixed-demo master is not complete P6")
+    depth_policy = capture.get("wrist_metric_depth_surface_policy")
+    if not isinstance(depth_policy, dict) or set(depth_policy) != set(
+        WRIST_METRIC_DEPTH_SURFACE_POLICY
+    ) or (
+        depth_policy.get("schema_version")
+        != WRIST_METRIC_DEPTH_SURFACE_POLICY["schema_version"]
+        or depth_policy.get("rigid_gripper_and_gelsight_housing_included")
+        is not True
+        or depth_policy.get("deformable_optical_gel_surface_included")
+        is not False
+    ):
+        raise FixedDemoBundleError(
+            "Fixed-demo master lacks the wrist-depth surface policy"
+        )
     annotation_source = capture.get("annotations")
     if not isinstance(annotation_source, dict) or (
         annotation_source.get("bbox") is not True

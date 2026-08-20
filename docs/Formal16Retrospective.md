@@ -145,6 +145,12 @@ P5/P6 的 wrist RGB 与机器人 state 显示 pad 已闭合时，`depth_m.npy` �
 `07_key_p6/obs_012`。该问题影响 Agent 对抓取状态和局部几何的判断，尤其污染 P5/P6 的
 跨 profile 比较。
 
+后续定位表明，Formal16 当时缺失的不只是可变形 pad：TacEx 还把左右四个刚性
+GelSight `case/plate` mesh 设为了 secondary-ray invisible。修复后的公开契约只让刚性
+housing 进入 wrist metric depth，继续排除 deformable optical gel surface；同状态 A/B
+恢复 9,979 个近深度像素，且两侧 tactile 核心数组逐元素不变。因此 Formal16 视频和
+depth 仍应作为 legacy 回归证据，不应与修复后的 P5/P6 rollout 混为同一传感器版本。
+
 ### 4. 强制 decision record/rationale
 
 Formal16 要求每个机器人动作重复填写结构化 rationale、evidence、alternatives 和参数依据。

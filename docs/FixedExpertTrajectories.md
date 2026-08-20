@@ -152,11 +152,15 @@ writing `p6_master_manifest.json`. A master is rejected unless replay reaches
 all source waypoints, passes the terminal task checker after 60 settling steps,
 and, for the bottle task, also passes release and pose-stability checks.
 
-The v2 P6 manifest is host-side provenance and deliberately has
+The v3 P6 manifest is host-side provenance and deliberately has
 `agent_ready=false`, `actions_present=false`, and
 `step_eef_conversion_performed=false`. It may contain evaluator evidence and
 must not be handed directly to an Agent. The implemented fixed-demo projector
 authenticates this master and creates a separate, Profile-safe Agent bundle.
+Before every waypoint capture, v3 additionally verifies the wrist-depth
+surface policy: four rigid GelSight case/plate meshes per environment must
+participate in secondary rays, while both deformable optical gel surfaces must
+remain excluded.
 
 ## Current maximal expert observation masters
 
@@ -166,18 +170,21 @@ motion and success checks:
 
 | Task | Seed | P6 observations | Replayed physics actions | P6 master manifest |
 | --- | ---: | ---: | ---: | --- |
-| `pull_out_key` | 0 | 28 | 551 | `expert_observation_master/pull_out_key_seed_0/p6_master_manifest.json` |
-| `put_bottle_in_shelf` | 1 | 44 | 871 | `expert_observation_master/put_bottle_in_shelf_seed_1/p6_master_manifest.json` |
+| `pull_out_key` | 0 | 28 | 551 | `expert_observation_master/pull_out_key_seed_0_wrist_depth_v3/p6_master_manifest.json` |
+| `put_bottle_in_shelf` | 1 | 44 | 871 | `expert_observation_master/put_bottle_in_shelf_seed_1_wrist_depth_v3/p6_master_manifest.json` |
 
-These paths are relative to the same staging root shown above. Both v2 masters
+These paths are relative to the same staging root shown above. Both v3 masters
 contain complete P6 observations at every original saved waypoint and both
-independent annotation sources at the initial waypoint only. The earlier
-`p6_master/` v1 directories are retained as immutable migration evidence but
-are superseded because they do not contain annotation sources.
+independent annotation sources at the initial waypoint only. The Key and
+Bottle manifest SHA-256 values are respectively
+`ff48c0c2df6e75152960e2a78af30ba79b43aaf82905a04093c816b89918fc44` and
+`3e3af14ab0184a9fbfe20129e8ea765c3563dc8182bd8288f998e4a528919c96`.
+The earlier unsuffixed v2 and `p6_master/` v1 directories remain immutable
+migration/regression evidence and are not selected by the registry.
 
 ## Export Agent-visible fixed demonstrations
 
-The host registry pins each task to the expected v2 master manifest SHA-256.
+The host registry pins each task to the expected v3 master manifest SHA-256.
 Projection fails closed if the registered manifest, a source observation, or
 any referenced artifact has changed. It then physically materializes only the
 requested Profile and annotation condition; disabled data has neither a field

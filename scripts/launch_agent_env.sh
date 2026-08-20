@@ -40,7 +40,20 @@ fi
 # matches the host kernel driver.  The host's injected bundle is deliberately
 # excluded: this project uses the independently prepared, reproducible bundle
 # on the shared data disk.
-DEFAULT_NVIDIA_RENDER_ROOT="/inspire/qb-ilm/project/semantic-visual-tokenizer/public/dzj/robomme_runtime/nvidia/570.195.03"
+HOST_DRIVER_VERSION=""
+if [[ -r /proc/driver/nvidia/version ]]; then
+  HOST_DRIVER_VERSION="$(
+    awk '/^NVRM version:/ { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+([.][0-9]+)+$/) { print $i; exit } }' \
+      /proc/driver/nvidia/version
+  )"
+fi
+if [[ -z "${HOST_DRIVER_VERSION}" ]]; then
+  echo "Cannot determine the host NVIDIA kernel-module version from /proc." >&2
+  exit 1
+fi
+
+NVIDIA_RENDER_BUNDLE_PARENT="/inspire/qb-ilm/project/semantic-visual-tokenizer/public/dzj/robomme_runtime/nvidia"
+DEFAULT_NVIDIA_RENDER_ROOT="${NVIDIA_RENDER_BUNDLE_PARENT}/${HOST_DRIVER_VERSION}"
 NVIDIA_RENDER_ROOT="${UNIVTAC_NVIDIA_RENDER_ROOT:-${DEFAULT_NVIDIA_RENDER_ROOT}}"
 NVIDIA_RENDER_ROOT="${NVIDIA_RENDER_ROOT%/}"
 NVIDIA_RENDER_VERSION="${UNIVTAC_NVIDIA_RENDER_VERSION:-$(basename -- "${NVIDIA_RENDER_ROOT}")}"
@@ -61,17 +74,6 @@ for required_path in \
   fi
 done
 
-HOST_DRIVER_VERSION=""
-if [[ -r /proc/driver/nvidia/version ]]; then
-  HOST_DRIVER_VERSION="$(
-    awk '/^NVRM version:/ { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+([.][0-9]+)+$/) { print $i; exit } }' \
-      /proc/driver/nvidia/version
-  )"
-fi
-if [[ -z "${HOST_DRIVER_VERSION}" ]]; then
-  echo "Cannot determine the host NVIDIA kernel-module version from /proc." >&2
-  exit 1
-fi
 if [[ "${HOST_DRIVER_VERSION}" != "${NVIDIA_RENDER_VERSION}" ]]; then
   echo "NVIDIA driver mismatch: bundle=${NVIDIA_RENDER_VERSION}, kernel=${HOST_DRIVER_VERSION}" >&2
   echo "Set UNIVTAC_NVIDIA_RENDER_ROOT only to a bundle matching the host kernel driver." >&2

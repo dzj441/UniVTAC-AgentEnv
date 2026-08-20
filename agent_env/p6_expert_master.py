@@ -41,10 +41,63 @@ P6_PROFILE = get_observation_profile(6)
 P6_MODALITIES = frozenset(P6_PROFILE.public_modalities)
 P6_ROBOT_STATE = frozenset(P6_PROFILE.public_robot_state)
 INSTANCE_DATA_TYPE = "instance_id_segmentation_fast"
+P6_MASTER_SCHEMA_VERSION = "univtac.fixed_expert_p6_master.v3"
+WRIST_METRIC_DEPTH_SURFACE_POLICY = {
+    "schema_version": "univtac.wrist_metric_depth_surface_policy.v1",
+    "rigid_gripper_and_gelsight_housing_included": True,
+    "deformable_optical_gel_surface_included": False,
+}
 
 
 class P6ExpertMasterError(ValueError):
     pass
+
+
+def validate_gelsight_wrist_depth_surface_policy(task: Any) -> None:
+    """Require the runtime GelSight depth policy before P6 master capture."""
+
+    if getattr(task.cfg, "tactile_sensor_type", None) != "gsmini":
+        raise P6ExpertMasterError(
+            "P6 expert capture requires the GelSight Mini depth surface policy"
+        )
+    report = getattr(task, "_gelsight_depth_visibility", None)
+    if not isinstance(report, dict) or report.get("schema_version") != (
+        "univtac.gelsight_wrist_depth_visibility.v1"
+    ):
+        raise P6ExpertMasterError(
+            "P6 expert capture lacks a validated GelSight depth visibility report"
+        )
+    expected_env_count = int(task.num_envs)
+    rigid_paths = report.get("rigid_case_plate_visible")
+    gelpad_paths = report.get("deformable_gelpads_hidden")
+    if not isinstance(rigid_paths, list) or len(rigid_paths) != 4 * expected_env_count:
+        raise P6ExpertMasterError(
+            "P6 expert capture has incomplete rigid GelSight depth targets"
+        )
+    if not isinstance(gelpad_paths, list) or len(gelpad_paths) != 2 * expected_env_count:
+        raise P6ExpertMasterError(
+            "P6 expert capture has incomplete deformable GelSight depth targets"
+        )
+    all_paths = rigid_paths + gelpad_paths
+    if any(not isinstance(path, str) for path in all_paths) or len(
+        set(all_paths)
+    ) != len(all_paths):
+        raise P6ExpertMasterError(
+            "P6 expert capture has invalid or duplicate GelSight depth targets"
+        )
+    stage = task.scene.stage
+    for path, expected in (
+        *((path, False) for path in rigid_paths),
+        *((path, True) for path in gelpad_paths),
+    ):
+        attribute = stage.GetPrimAtPath(path).GetAttribute(
+            "primvars:invisibleToSecondaryRays"
+        )
+        if not attribute or not attribute.IsValid() or attribute.Get() is not expected:
+            raise P6ExpertMasterError(
+                "P6 expert capture violates the GelSight depth surface policy at "
+                f"{path}"
+            )
 
 
 def _read_json(path: Path, label: str) -> dict[str, Any]:
@@ -136,6 +189,7 @@ def capture_p6_observation(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Serialize one actual simulator waypoint with the public P6 schema."""
 
+    validate_gelsight_wrist_depth_surface_policy(task)
     raw = task._get_observations()
     if raw.get("actor"):
         raise P6ExpertMasterError("P6 master capture must not request actor observations")
@@ -568,7 +622,7 @@ def build_p6_master_manifest(
     if not replay_video.is_relative_to(master_root) or not replay_video.is_file():
         raise P6ExpertMasterError("P6 replay video is missing or escaped the master")
     return {
-        "schema_version": "univtac.fixed_expert_p6_master.v2",
+        "schema_version": P6_MASTER_SCHEMA_VERSION,
         "task": task,
         "seed": int(seed),
         "trajectory_representation": "successful_expert_observation_waypoints",
@@ -588,6 +642,9 @@ def build_p6_master_manifest(
         },
         "capture": {
             "observation_profile": P6_PROFILE.to_manifest(),
+            "wrist_metric_depth_surface_policy": dict(
+                WRIST_METRIC_DEPTH_SURFACE_POLICY
+            ),
             "annotations": {
                 "bbox": True,
                 "mask": True,

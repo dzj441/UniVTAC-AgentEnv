@@ -17,6 +17,7 @@ import carb
 import omni.ui
 import logging
 from contextlib import suppress
+from pxr import Sdf, Usd
 
 from agent_env.eef_control import classify_delta_eef_action
 from isaacsim.core.api.objects import VisualCuboid
@@ -70,6 +71,7 @@ from ._global import *
 from .utils import *
 from .robot.robot import RobotManager
 from .robot.robot_cfg import *
+from .robot.gelsight_depth_visibility import apply_gelsight_wrist_depth_visibility
 from .sensors.camera import CameraManager, CameraCfg
 from .sensors.tactile import TactileManager, TactileCfg, create_tactile_cfg
 
@@ -257,6 +259,38 @@ class BaseTask(UipcRLEnv):
         self._tactile_manager.setup()
         self._tactile_manager.set_debug_vis(self.cfg.debug_vis)
         self.set_debug_vis(self.cfg.debug_vis)
+
+    def _configure_gelsight_depth_visibility(self):
+        if self.cfg.tactile_sensor_type != 'gsmini':
+            return None
+        stage = self.scene.stage
+        if stage is None:
+            raise RuntimeError("Cannot configure GelSight depth without a USD stage")
+        case_root_prims = []
+        gelpad_root_prims = []
+        for tactile_cfg in self.cfg.robot.tactiles:
+            case_root_prims.extend(
+                sim_utils.find_matching_prims(
+                    tactile_cfg.sensor_cfg.prim_path,
+                    stage=stage,
+                )
+            )
+            gelpad_root_prims.extend(
+                sim_utils.find_matching_prims(
+                    tactile_cfg.gelpad_cfg.prim_path,
+                    stage=stage,
+                )
+            )
+        # agentic team comment: Author only on the runtime session layer so
+        # agentic team comment: the vendored TacEx USD remains untouched.
+        with Usd.EditContext(stage, stage.GetSessionLayer()):
+            return apply_gelsight_wrist_depth_visibility(
+                stage,
+                case_root_prims=case_root_prims,
+                gelpad_root_prims=gelpad_root_prims,
+                expected_env_count=self.num_envs,
+                bool_type_name=Sdf.ValueTypeNames.Bool,
+            )
     
     def load_robot_and_sensors(self, cfg:BaseTaskCfg):
         data_type = ["camera_depth", "tactile_rgb", "marker_rgb", "marker_motion"]
@@ -300,9 +334,13 @@ class BaseTask(UipcRLEnv):
         '''
         self._setup_base_scene()
         self.scene.clone_environments(copy_from_source=False)
-        
+
         self._actor_manager = ActorManager(self)
         self.create_actors()
+
+        # agentic team comment: Fix GelSight depth visibility after every
+        # agentic team comment: clone exists but before sensors/reset/render.
+        self._gelsight_depth_visibility = self._configure_gelsight_depth_visibility()
 
         # add sensors
         self._camera_manager = CameraManager(self.cfg.cameras, self)

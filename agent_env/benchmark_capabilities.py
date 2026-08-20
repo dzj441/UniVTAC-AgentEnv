@@ -233,7 +233,13 @@ class BenchmarkCapabilityGateway:
             for label, path, sha256 in images:
                 content.extend(
                     [
-                        {"type": "inputText", "text": f"The next image is {label}."},
+                        {
+                            "type": "inputText",
+                            "text": (
+                                "The next image corresponds to public JSON field "
+                                f"{label}."
+                            ),
+                        },
                         {
                             "type": "inputImage",
                             "imageUrl": self._png_data_url(path, sha256),
@@ -442,9 +448,16 @@ class BenchmarkCapabilityGateway:
         seen: set[Path] = set()
         current_artifacts = current_artifacts or {}
 
-        def visit(value: Any, *, key: str = "artifact") -> Any:
+        def visit(
+            value: Any,
+            *,
+            public_path: tuple[str, ...] = (),
+        ) -> Any:
             if isinstance(value, list):
-                return [visit(item, key=key) for item in value]
+                return [
+                    visit(item, public_path=(*public_path, str(index)))
+                    for index, item in enumerate(value)
+                ]
             if not isinstance(value, dict):
                 return copy.deepcopy(value)
             output: JsonDict = {}
@@ -460,7 +473,10 @@ class BenchmarkCapabilityGateway:
             for child_key, child_value in value.items():
                 if child_key in {"path", "run_dir", "content_image"}:
                     continue
-                output[child_key] = visit(child_value, key=child_key)
+                output[child_key] = visit(
+                    child_value,
+                    public_path=(*public_path, child_key),
+                )
             sha256 = value.get("sha256")
             if (
                 path is not None
@@ -469,7 +485,8 @@ class BenchmarkCapabilityGateway:
                 and isinstance(sha256, str)
                 and path not in seen
             ):
-                images.append((key, path, sha256))
+                label = ".".join(public_path) or "artifact"
+                images.append((label, path, sha256))
                 seen.add(path)
             return output
 

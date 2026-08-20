@@ -38,6 +38,7 @@ from agent_env.capabilities import CapabilityViolation
 from agent_env.contract import EVALUATOR_SEED_ENV
 from agent_env.icl import get_icl_condition, list_icl_conditions
 from scripts.run_codex_benchmark import (
+    BASE_INSTRUCTIONS,
     codex_sandbox_policy,
     effective_codex_network_access,
     operator_prompt,
@@ -135,6 +136,15 @@ def test_operator_prompt_is_only_task_instruction_and_optional_condition_notice(
     assert "decision_record" not in multi
 
 
+def test_base_instruction_contains_only_robot_lifecycle_and_terminal_feedback() -> None:
+    assert BASE_INSTRUCTIONS == (
+        "Control the robot through start_episode, step_eef, and finish_episode. After each\n"
+        "robot-control tool call, wait until its resulting observation is provided before\n"
+        "calling another robot-control tool. Task success is returned only by finish_episode.\n"
+    )
+    assert "runtime capabilities" not in BASE_INSTRUCTIONS
+
+
 def test_icl_axis_and_minimal_demo_discovery_notice() -> None:
     assert [condition.name for condition in list_icl_conditions()] == [
         "none",
@@ -195,8 +205,9 @@ def test_reference_runner_defaults_to_multiturn_and_network_enabled(
     )
     defaults = parse_args()
     assert defaults.interaction_mode == "action_per_turn"
-    assert defaults.codex_sandbox == "workspace-write"
+    assert defaults.codex_sandbox == "danger-full-access"
     assert defaults.codex_network_access is True
+    assert defaults.effort == "high"
 
     monkeypatch.setattr(
         sys,
@@ -423,6 +434,14 @@ def test_gateway_strips_paths_attaches_images_and_hides_success(tmp_path: Path) 
     assert started.success
     assert "path" not in str(started.public_response)
     assert any(item["type"] == "inputImage" for item in started.content_items)
+    assert {
+        item["text"]
+        for item in started.content_items
+        if item["type"] == "inputText"
+    } >= {
+        "The next image corresponds to public JSON field "
+        "observation.modalities.head_rgb."
+    }
     with pytest.raises(CapabilityViolation, match="success leaked"):
         gateway.execute(
             "step_eef",
@@ -433,6 +452,75 @@ def test_gateway_strips_paths_attaches_images_and_hides_success(tmp_path: Path) 
                 "delta_gripper": 0,
             },
         )
+
+
+def test_gateway_image_labels_are_complete_public_json_paths(tmp_path: Path) -> None:
+    from PIL import Image
+
+    observation_root = tmp_path / "observations" / "obs_000"
+    observation_root.mkdir(parents=True)
+
+    def artifact(relative: str) -> dict[str, object]:
+        path = observation_root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (2, 2), "black").save(path)
+        return {
+            "path": str(path),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "media_type": "image/png",
+            "content_image": True,
+        }
+
+    response = {
+        "status": "rollout_started",
+        "observation": {
+            "observation_id": "obs_000",
+            "modalities": {
+                "head_depth": {
+                    "valid_mask": artifact("head/depth_valid_mask.png"),
+                    "visualization": artifact("head/depth_visualization.png"),
+                },
+                "wrist_depth": {
+                    "valid_mask": artifact("wrist/depth_valid_mask.png"),
+                },
+            },
+            "annotations": {
+                "wrist": {
+                    "goal_fixture": {
+                        "bbox_overlay": artifact(
+                            "annotations/wrist/goal_fixture_bbox_overlay.png"
+                        ),
+                    }
+                }
+            },
+            "robot_state": {},
+        },
+    }
+    gateway = BenchmarkCapabilityGateway(
+        task=get_benchmark_task("pull_out_key"),
+        profile=get_observation_profile(6),
+        annotations=AnnotationCapabilities(provide_bbox=True),
+        simulator_request=lambda _: response,
+        simulator_run_dir=tmp_path,
+    )
+
+    started = gateway.execute("start_episode", {})
+    labels = [
+        item["text"]
+        for item in started.content_items
+        if item["type"] == "inputText"
+        and item["text"].startswith("The next image corresponds")
+    ]
+    assert labels == [
+        "The next image corresponds to public JSON field "
+        "observation.modalities.head_depth.valid_mask.",
+        "The next image corresponds to public JSON field "
+        "observation.modalities.head_depth.visualization.",
+        "The next image corresponds to public JSON field "
+        "observation.modalities.wrist_depth.valid_mask.",
+        "The next image corresponds to public JSON field "
+        "observation.annotations.wrist.goal_fixture.bbox_overlay.",
+    ]
 
 
 def test_gateway_keeps_terminal_checker_details_private(tmp_path: Path) -> None:

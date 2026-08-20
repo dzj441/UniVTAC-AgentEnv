@@ -72,12 +72,13 @@ The launcher defaults to the configured parent environment:
 ../miniconda3/envs/UniVTAC/bin/python
 ```
 
-Set `UNIVTAC_PYTHON` to override it. On the current cluster the launcher uses
-the independently prepared NVIDIA 570.195.03 **userspace-only** rendering stack
-at:
+Set `UNIVTAC_PYTHON` to override it. On the current cluster the launcher reads
+the kernel-module version from `/proc/driver/nvidia/version` and selects the
+same-version, independently prepared NVIDIA **userspace-only** rendering stack
+under:
 
 ```text
-/inspire/qb-ilm/project/semantic-visual-tokenizer/public/dzj/robomme_runtime/nvidia/570.195.03
+/inspire/qb-ilm/project/semantic-visual-tokenizer/public/dzj/robomme_runtime/nvidia/<kernel-driver-version>
 ```
 
 The machine also needs three small, generic runtime packages (no NVIDIA or CUDA
@@ -97,11 +98,12 @@ a CUDA Driver API smoke test, and audits actual mapped library paths both before
 Kit startup and inside the live Isaac process. The audit is stored in
 `manifest.json`.
 
-The host must still provide a matching 570.195.03 kernel module and GPU device
-nodes; a userspace bundle cannot replace those. The launcher never installs or
-changes a kernel module, CUDA toolkit, or NVIDIA package. To use another machine,
-point `UNIVTAC_NVIDIA_RENDER_ROOT` at an exact-match bundle; if its directory
-basename is not the driver version, also set `UNIVTAC_NVIDIA_RENDER_VERSION`.
+The host must still provide a matching kernel module and GPU device nodes; a
+userspace bundle cannot replace those. The launcher never installs or changes
+a kernel module, CUDA toolkit, or NVIDIA package. To use a bundle outside the
+shared version registry, point `UNIVTAC_NVIDIA_RENDER_ROOT` at an exact match;
+if its directory basename is not the driver version, also set
+`UNIVTAC_NVIDIA_RENDER_VERSION`.
 
 The transport is newline-delimited JSON on stdin/stdout. Machine-readable
 responses start with `AGENT_ENV_RESULT `. The command sequence is:

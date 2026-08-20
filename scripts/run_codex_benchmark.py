@@ -67,13 +67,9 @@ from agent_env.stdio_bridge import SimulatorProcessClient  # noqa: E402
 
 
 BASE_INSTRUCTIONS = """\
-Control the robot through start_episode, step_eef, and finish_episode. General
-runtime capabilities may be used freely, but they do not provide another robot-
-control path. Task success is returned only by finish_episode.
-"""
-
-DEVELOPER_INSTRUCTIONS = """\
-Treat the dynamic embodied tools as the complete robot-control boundary.
+Control the robot through start_episode, step_eef, and finish_episode. After each
+robot-control tool call, wait until its resulting observation is provided before
+calling another robot-control tool. Task success is returned only by finish_episode.
 """
 
 
@@ -172,16 +168,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--codex-sandbox",
         choices=("read-only", "workspace-write", "danger-full-access"),
-        default="workspace-write",
-        help="Evaluator-controlled Codex sandbox; benchmark workspace stays temporary.",
+        default="danger-full-access",
+        help=(
+            "Evaluator-controlled Codex sandbox; defaults to danger-full-access "
+            "while the reference host's bubblewrap support remains unavailable."
+        ),
     )
     parser.add_argument(
         "--codex-network-access",
         action=argparse.BooleanOptionalAction,
         default=True,
         help=(
-            "Evaluator-controlled network policy for general Codex tools; enabled "
-            "by default and recorded in the run manifest."
+            "Evaluator-controlled network policy for read-only/workspace-write; "
+            "danger-full-access always permits network. The requested and effective "
+            "conditions are both recorded in the run manifest."
         ),
     )
     parser.add_argument("--timeout-seconds", type=float, default=3600.0)
@@ -433,9 +433,6 @@ def main() -> int:
         (run_dir / "codex_base_instructions.txt").write_text(
             BASE_INSTRUCTIONS, encoding="utf-8"
         )
-        (run_dir / "codex_developer_instructions.txt").write_text(
-            DEVELOPER_INSTRUCTIONS, encoding="utf-8"
-        )
         write_json(run_dir / "codex_capabilities.json", capabilities)
 
         with IsolatedCodexEnvironment(
@@ -527,8 +524,8 @@ def main() -> int:
                 "operator_prompt_sha256": sha256_text(prompt),
                 "base_instructions_file": "codex_base_instructions.txt",
                 "base_instructions_sha256": sha256_text(BASE_INSTRUCTIONS),
-                "developer_instructions_file": "codex_developer_instructions.txt",
-                "developer_instructions_sha256": sha256_text(DEVELOPER_INSTRUCTIONS),
+                "developer_instructions_file": None,
+                "developer_instructions_sha256": None,
                 "capability_manifest_file": "codex_capabilities.json",
                 "capability_manifest_sha256": capabilities["sha256"],
                 "simulator_ready_commitment": ready.get("seed_commitment_sha256"),
@@ -542,6 +539,7 @@ def main() -> int:
                     "network_access_requested": bool(args.codex_network_access),
                     "network_access_permitted_by_codex_sandbox": network_access,
                     "policy_owner": "evaluator",
+                    "agent_activity_policy": "audited_not_prohibited_by_benchmark",
                 },
                 "enforcement": {
                     "dynamic_tool_allowlist": True,
@@ -586,7 +584,7 @@ def main() -> int:
                 gateway=gateway,
                 model=args.model,
                 base_instructions=BASE_INSTRUCTIONS,
-                developer_instructions=DEVELOPER_INSTRUCTIONS,
+                developer_instructions=None,
                 sandbox=args.codex_sandbox,
             )
             turn_summaries: list[dict[str, Any]] = []
@@ -621,6 +619,9 @@ def main() -> int:
                         ),
                         "dynamic_tool_call_count": turn[
                             "dynamic_tool_call_count"
+                        ],
+                        "suppressed_dynamic_tool_call_count": turn[
+                            "suppressed_dynamic_tool_call_count"
                         ],
                         "last_dynamic_tool": turn["last_dynamic_tool"],
                         "interrupted_after_dynamic_tool": turn[

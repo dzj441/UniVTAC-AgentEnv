@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import h5py
 import numpy as np
@@ -18,7 +19,92 @@ from agent_env.p6_expert_master import (
     P6ExpertMasterError,
     build_p6_master_manifest,
     validate_fixed_expert_source,
+    validate_gelsight_wrist_depth_surface_policy,
 )
+
+
+class _VisibilityAttribute:
+    def __init__(self, value: bool) -> None:
+        self.value = value
+
+    def __bool__(self) -> bool:
+        return True
+
+    def IsValid(self) -> bool:
+        return True
+
+    def Get(self) -> bool:
+        return self.value
+
+
+class _VisibilityPrim:
+    def __init__(self, value: bool) -> None:
+        self.attribute = _VisibilityAttribute(value)
+
+    def GetAttribute(self, name: str) -> _VisibilityAttribute:
+        assert name == "primvars:invisibleToSecondaryRays"
+        return self.attribute
+
+
+class _VisibilityStage:
+    def __init__(self, values: dict[str, bool]) -> None:
+        self.prims = {
+            path: _VisibilityPrim(value) for path, value in values.items()
+        }
+
+    def GetPrimAtPath(self, path: str) -> _VisibilityPrim:
+        return self.prims[path]
+
+
+def visibility_task() -> SimpleNamespace:
+    rigid = [f"/rigid_{index}" for index in range(4)]
+    gelpads = [f"/gelpad_{index}" for index in range(2)]
+    stage = _VisibilityStage(
+        {
+            **{path: False for path in rigid},
+            **{path: True for path in gelpads},
+        }
+    )
+    return SimpleNamespace(
+        cfg=SimpleNamespace(tactile_sensor_type="gsmini"),
+        num_envs=1,
+        scene=SimpleNamespace(stage=stage),
+        _gelsight_depth_visibility={
+            "schema_version": "univtac.gelsight_wrist_depth_visibility.v1",
+            "rigid_case_plate_visible": rigid,
+            "deformable_gelpads_hidden": gelpads,
+        },
+    )
+
+
+def test_p6_capture_accepts_validated_gelsight_depth_surface_policy() -> None:
+    validate_gelsight_wrist_depth_surface_policy(visibility_task())
+
+
+def test_p6_capture_requires_gelsight_depth_visibility_report() -> None:
+    task = visibility_task()
+    del task._gelsight_depth_visibility
+
+    with pytest.raises(P6ExpertMasterError, match="lacks a validated"):
+        validate_gelsight_wrist_depth_surface_policy(task)
+
+
+def test_p6_capture_rejects_duplicate_gelsight_depth_targets() -> None:
+    task = visibility_task()
+    rigid = task._gelsight_depth_visibility["rigid_case_plate_visible"]
+    rigid[-1] = rigid[0]
+
+    with pytest.raises(P6ExpertMasterError, match="invalid or duplicate"):
+        validate_gelsight_wrist_depth_surface_policy(task)
+
+
+def test_p6_capture_rechecks_composed_gelsight_visibility_values() -> None:
+    task = visibility_task()
+    rigid = task._gelsight_depth_visibility["rigid_case_plate_visible"]
+    task.scene.stage.prims[rigid[0]].attribute.value = True
+
+    with pytest.raises(P6ExpertMasterError, match="violates"):
+        validate_gelsight_wrist_depth_surface_policy(task)
 
 
 def write_source(path: Path) -> None:
@@ -168,7 +254,7 @@ def test_p6_master_freezes_complete_observation_waypoints(tmp_path: Path) -> Non
     inputs = master_fixture(tmp_path)
     manifest = build_p6_master_manifest(**inputs)
 
-    assert manifest["schema_version"] == "univtac.fixed_expert_p6_master.v2"
+    assert manifest["schema_version"] == "univtac.fixed_expert_p6_master.v3"
     assert manifest["actions_present"] is False
     assert manifest["step_eef_conversion_performed"] is False
     assert manifest["agent_ready"] is False
@@ -176,6 +262,11 @@ def test_p6_master_freezes_complete_observation_waypoints(tmp_path: Path) -> Non
     assert manifest["capture"]["observation_profile"]["index"] == 6
     assert manifest["capture"]["annotations"]["bbox"] is True
     assert manifest["capture"]["annotations"]["mask"] is True
+    assert manifest["capture"]["wrist_metric_depth_surface_policy"] == {
+        "schema_version": "univtac.wrist_metric_depth_surface_policy.v1",
+        "rigid_gripper_and_gelsight_housing_included": True,
+        "deformable_optical_gel_surface_included": False,
+    }
     assert (
         manifest["capture"]["annotations"]["schedule"]
         == "initial_observation_only"
