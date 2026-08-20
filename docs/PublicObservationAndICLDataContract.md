@@ -395,8 +395,10 @@ The reference runner selects the diagnostic condition with
 one to the Agent. `fixed_demo` projects the matching task/profile/annotation
 bundle into the temporary workspace before the Agent thread and adds only a minimal
 discoverability notice. It is incompatible with `--pre-move` because the
-registered demonstrations begin ungrasped. Final prompt wording remains a
-separately versioned benchmark decision.
+registered demonstrations begin ungrasped. The operator prompt otherwise contains
+only the task instruction; the ICL condition adds one sentence naming
+`benchmark_inputs/expert_demo/`. Tool lifecycle semantics live in the static base
+instruction and tool descriptions, not in task-specific strategy text.
 
 The fixed demonstration's private collection seed is also excluded from the
 same-task evaluation condition. Default evaluator seeds already come from a
@@ -461,6 +463,7 @@ A release is valid only if automated checks establish all of the following:
 | new expert collection | Historical source is RGB-focused | Record maximal P6 and initial annotation directly |
 | independent replay | P6 migration mode exists | Make maximal observation recording a normal replay product |
 | Codex general capabilities | Generic v1 runner inherits evaluator configuration and does not disable built-ins | Keep runtime policy evaluator-controlled and recorded |
+| Codex action narration | `rationale`, `decision_record`, `agent_note`, and `final_note` removed from generic v1 tools | Record native App Server activity instead of forcing duplicate prose |
 
 The two existing replay-proven demonstrations have v2 maximal masters with the
 initial annotation source. Their 48 public projections have been validated.
@@ -472,8 +475,8 @@ annotations a normal output of collection and replay for future assets.
 With projection and runtime integration completed, development can proceed
 independently:
 
-1. ICL path: run real Codex rollouts, review usability, and freeze the final
-   prompt and schema wording;
+1. ICL path: run real Codex rollouts with the minimal rationale-free prompt and
+   review demonstration usability;
 2. collection/replay path: make maximal P6 plus initial annotation a normal
    product of both stages and remove the extra migration pass for new assets;
 3. runtime path: retain the implemented clean temporary workspace and

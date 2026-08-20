@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import sys
 from pathlib import Path
 
 import pytest
@@ -40,25 +41,9 @@ from scripts.run_codex_benchmark import (
     codex_sandbox_policy,
     effective_codex_network_access,
     operator_prompt,
+    parse_args,
     validate_fixed_demo_evaluation_seed,
 )
-
-
-def decision(source: str = "head_rgb") -> dict:
-    return {
-        "evidence": [
-            {
-                "source": source,
-                "finding": "The target shifted in the latest image.",
-                "implication": "A smaller correction is appropriate.",
-            }
-        ],
-        "alternatives_considered": ["Hold position and observe again."],
-        "uncertainty": 0.25,
-        "expected_effect": "Move toward the visible target.",
-        "parameter_rationale": "One centimetre limits overshoot.",
-        "rationale": "Use the latest visible displacement.",
-    }
 
 
 def test_six_observation_profiles_match_the_main_axis() -> None:
@@ -133,7 +118,7 @@ def test_operator_prompt_discloses_configured_episode_token_budget() -> None:
     assert "makes the benchmark result a failure" in limited
 
 
-def test_action_per_turn_prompt_preserves_one_episode_without_single_turn_rule() -> None:
+def test_operator_prompt_is_only_task_instruction_and_optional_condition_notice() -> None:
     single = operator_prompt(
         "pull_out_key",
         pre_move=False,
@@ -144,11 +129,10 @@ def test_action_per_turn_prompt_preserves_one_episode_without_single_turn_rule()
         pre_move=False,
         interaction_mode="action_per_turn",
     )
-    assert "Do not end the turn while the episode is active" in single
-    assert "Do not end the turn while the episode is active" not in multi
-    assert "Execute exactly one episode" in multi
-    assert "Begin with start_episode" in multi
-    assert "call finish_episode" in multi
+    assert single == multi
+    assert single == "Grasp the key and pull it completely out of the slot.\n"
+    assert "start_episode" not in multi
+    assert "decision_record" not in multi
 
 
 def test_icl_axis_and_minimal_demo_discovery_notice() -> None:
@@ -192,6 +176,42 @@ def test_codex_sandbox_and_network_policy_are_explicit(tmp_path: Path) -> None:
         workspace=workspace,
         network_access=True,
     ) == {"type": "dangerFullAccess"}
+
+
+def test_reference_runner_defaults_to_multiturn_and_network_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_codex_benchmark.py",
+            "--task",
+            "pull_out_key",
+            "--profile",
+            "1",
+            "--dry-run",
+        ],
+    )
+    defaults = parse_args()
+    assert defaults.interaction_mode == "action_per_turn"
+    assert defaults.codex_sandbox == "workspace-write"
+    assert defaults.codex_network_access is True
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_codex_benchmark.py",
+            "--task",
+            "pull_out_key",
+            "--profile",
+            "1",
+            "--no-codex-network-access",
+            "--dry-run",
+        ],
+    )
+    assert parse_args().codex_network_access is False
 
 
 def test_fixed_demo_excludes_its_seed_from_evaluation() -> None:
@@ -252,23 +272,39 @@ def test_dynamic_registry_contains_exactly_three_tools() -> None:
         get_observation_profile(6), AnnotationCapabilities(True, True)
     )
     assert list(registry) == ["start_episode", "step_eef", "finish_episode"]
-    sources = registry["step_eef"].input_schema["properties"]["decision_record"][
-        "properties"
-    ]["evidence"]["items"]["properties"]["source"]["enum"]
-    assert "object_bbox" in sources
-    assert "object_mask" in sources
-    assert "camera_extrinsics" in sources
-    assert "expert_demo" not in sources
+    assert registry["start_episode"].input_schema == {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [],
+        "properties": {},
+    }
+    assert set(registry["step_eef"].input_schema["properties"]) == {
+        "observation_id",
+        "delta_position",
+        "delta_rpy",
+        "delta_gripper",
+    }
+    assert set(registry["step_eef"].input_schema["required"]) == {
+        "observation_id",
+        "delta_position",
+        "delta_rpy",
+        "delta_gripper",
+    }
+    assert registry["finish_episode"].input_schema["required"] == ["observation_id"]
+    assert set(registry["finish_episode"].input_schema["properties"]) == {
+        "observation_id"
+    }
+    assert all(not tool.requires_decision_record for tool in registry.values())
 
     fixed_demo_registry = build_benchmark_tool_registry(
         get_observation_profile(6),
         AnnotationCapabilities(True, True),
         get_icl_condition("fixed_demo"),
     )
-    fixed_demo_sources = fixed_demo_registry["step_eef"].input_schema["properties"][
-        "decision_record"
-    ]["properties"]["evidence"]["items"]["properties"]["source"]["enum"]
-    assert "expert_demo" in fixed_demo_sources
+    assert (
+        fixed_demo_registry["step_eef"].input_schema
+        == registry["step_eef"].input_schema
+    )
 
 
 def test_capability_manifest_is_deterministic_and_task_specific() -> None:
@@ -313,10 +349,34 @@ def test_capability_manifest_is_deterministic_and_task_specific() -> None:
 
 
 def test_public_wire_schema_excludes_host_close() -> None:
-    titles = [variant["title"] for variant in public_benchmark_command_schema()["oneOf"]]
+    variants = {
+        variant["title"]: variant
+        for variant in public_benchmark_command_schema()["oneOf"]
+    }
+    titles = list(variants)
     assert titles == ["start", "step", "finish"]
+    assert variants["start"]["properties"] == {"command": {"const": "start"}}
+    assert set(variants["step"]["properties"]) == {
+        "command",
+        "observation_id",
+        "delta_position",
+        "delta_rpy",
+        "delta_gripper",
+    }
+    assert set(variants["finish"]["properties"]) == {"command", "observation_id"}
     with pytest.raises(ValueError, match="Missing required"):
         validate_benchmark_command_fields({"command": "step"})
+    with pytest.raises(ValueError, match="Unknown field.*rationale"):
+        validate_benchmark_command_fields(
+            {
+                "command": "step",
+                "observation_id": "obs_000",
+                "delta_position": [0, 0, 0],
+                "delta_rpy": [0, 0, 0],
+                "delta_gripper": 0,
+                "rationale": "legacy narration",
+            }
+        )
 
 
 def test_gateway_strips_paths_attaches_images_and_hides_success(tmp_path: Path) -> None:
@@ -359,7 +419,7 @@ def test_gateway_strips_paths_attaches_images_and_hides_success(tmp_path: Path) 
         simulator_request=lambda _: next(responses),
         simulator_run_dir=tmp_path,
     )
-    started = gateway.execute("start_episode", {"agent_note": "test"})
+    started = gateway.execute("start_episode", {})
     assert started.success
     assert "path" not in str(started.public_response)
     assert any(item["type"] == "inputImage" for item in started.content_items)
@@ -371,7 +431,6 @@ def test_gateway_strips_paths_attaches_images_and_hides_success(tmp_path: Path) 
                 "delta_position": [0, 0, 0],
                 "delta_rpy": [0, 0, 0],
                 "delta_gripper": 0,
-                "decision_record": decision(),
             },
         )
 
@@ -412,13 +471,11 @@ def test_gateway_keeps_terminal_checker_details_private(tmp_path: Path) -> None:
         simulator_request=lambda _: next(responses),
         simulator_run_dir=tmp_path,
     )
-    gateway.execute("start_episode", {"agent_note": "test terminal projection"})
+    gateway.execute("start_episode", {})
     finished = gateway.execute(
         "finish_episode",
         {
             "observation_id": "obs_000",
-            "final_note": "Request terminal evaluation.",
-            "decision_record": decision(),
         },
     )
 
@@ -510,7 +567,7 @@ def test_gateway_publishes_only_current_metric_depth_and_raw_masks(
         simulator_run_dir=run_dir,
         agent_workspace=workspace,
     )
-    started = gateway.execute("start_episode", {"agent_note": "test current files"})
+    started = gateway.execute("start_episode", {})
     depth = started.public_response["observation"]["modalities"]["head_depth"][
         "depth_m"
     ]
@@ -537,7 +594,6 @@ def test_gateway_publishes_only_current_metric_depth_and_raw_masks(
             "delta_position": [0.0, 0.0, 0.0],
             "delta_rpy": [0.0, 0.0, 0.0],
             "delta_gripper": 0.0,
-            "decision_record": decision("head_depth"),
         },
     )
     assert stepped.success

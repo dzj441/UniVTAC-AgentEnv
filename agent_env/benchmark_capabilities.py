@@ -45,73 +45,6 @@ def _object_schema(
     }
 
 
-def _evidence_sources(
-    profile: ObservationProfile,
-    annotations: AnnotationCapabilities,
-    icl_condition: ICLCondition,
-) -> tuple[str, ...]:
-    sources = [*profile.public_modalities, "robot_state"]
-    if profile.expose_camera_intrinsics:
-        sources.append("camera_intrinsics")
-    if profile.expose_camera_extrinsics:
-        sources.append("camera_extrinsics")
-    if annotations.provide_bbox:
-        sources.append("object_bbox")
-    if annotations.provide_mask:
-        sources.append("object_mask")
-    if icl_condition.fixed_demo_available:
-        sources.append("expert_demo")
-    return tuple(sources)
-
-
-def _decision_schema(
-    profile: ObservationProfile,
-    annotations: AnnotationCapabilities,
-    icl_condition: ICLCondition,
-) -> JsonDict:
-    return {
-        "type": "object",
-        "additionalProperties": False,
-        "required": [
-            "evidence",
-            "alternatives_considered",
-            "uncertainty",
-            "expected_effect",
-            "parameter_rationale",
-            "rationale",
-        ],
-        "properties": {
-            "evidence": {
-                "type": "array",
-                "minItems": 1,
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["source", "finding", "implication"],
-                    "properties": {
-                        "source": {
-                            "enum": list(
-                                _evidence_sources(profile, annotations, icl_condition)
-                            )
-                        },
-                        "finding": _string_schema("What was directly observed."),
-                        "implication": _string_schema("How it affects this decision."),
-                    },
-                },
-            },
-            "alternatives_considered": {
-                "type": "array",
-                "minItems": 1,
-                "items": _string_schema("A considered alternative."),
-            },
-            "uncertainty": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-            "expected_effect": _string_schema("Expected observable effect."),
-            "parameter_rationale": _string_schema("Why these exact numeric values."),
-            "rationale": _string_schema("Concise auditable reasoning summary."),
-        },
-    }
-
-
 def build_benchmark_tool_registry(
     profile: ObservationProfile,
     annotations: AnnotationCapabilities,
@@ -119,7 +52,6 @@ def build_benchmark_tool_registry(
 ) -> dict[str, EmbodiedToolSpec]:
     if isinstance(icl_condition, str):
         icl_condition = get_icl_condition(icl_condition)
-    decision = _decision_schema(profile, annotations, icl_condition)
     observation_id = _string_schema("Latest observation_id returned by a successful tool.")
     vector3 = {
         "type": "array",
@@ -131,10 +63,7 @@ def build_benchmark_tool_registry(
         EmbodiedToolSpec(
             name="start_episode",
             description="Start exactly one episode and return its first observation.",
-            input_schema=_object_schema(
-                {"agent_note": _string_schema("Purpose of this independent rollout.")},
-                ("agent_note",),
-            ),
+            input_schema=_object_schema({}, ()),
             simulator_command="start",
             effect="world_mutating",
             allowed_stages=frozenset({"ready"}),
@@ -164,19 +93,18 @@ def build_benchmark_tool_registry(
                         "maximum": 0.005,
                         "description": "Per-finger qpos delta in metres; abs <=0.005.",
                     },
-                    "decision_record": decision,
                 },
                 (
                     "observation_id",
                     "delta_position",
                     "delta_rpy",
                     "delta_gripper",
-                    "decision_record",
                 ),
             ),
             simulator_command="step",
             effect="world_mutating",
             allowed_stages=frozenset({"active"}),
+            requires_decision_record=False,
         ),
         EmbodiedToolSpec(
             name="finish_episode",
@@ -187,14 +115,13 @@ def build_benchmark_tool_registry(
             input_schema=_object_schema(
                 {
                     "observation_id": observation_id,
-                    "final_note": _string_schema("Terminal summary of the attempt."),
-                    "decision_record": decision,
                 },
-                ("observation_id", "final_note", "decision_record"),
+                ("observation_id",),
             ),
             simulator_command="finish",
             effect="terminal",
             allowed_stages=frozenset({"active"}),
+            requires_decision_record=False,
         ),
     )
     return {tool.name: tool for tool in tools}
@@ -278,16 +205,9 @@ class BenchmarkCapabilityGateway:
             try:
                 command, decision = self._build_command(spec, arguments)
             except ToolInputError as exc:
-                rejected_decision = None
-                if spec.requires_decision_record and "decision_record" in arguments:
-                    try:
-                        rejected_decision = self._validate_decision(arguments["decision_record"])
-                    except ToolInputError:
-                        pass
                 return self._rejected(
                     tool_name,
                     str(exc),
-                    decision_record=rejected_decision,
                     public_observation_id=self.latest_observation_id,
                 )
 
@@ -349,7 +269,6 @@ class BenchmarkCapabilityGateway:
         decision = None
         command: JsonDict = {"command": spec.simulator_command}
         if spec.name == "start_episode":
-            command["agent_note"] = self._nonempty(arguments["agent_note"], "agent_note")
             return command, decision
 
         observation_id = self._nonempty(arguments["observation_id"], "observation_id")
@@ -357,16 +276,7 @@ class BenchmarkCapabilityGateway:
             raise ToolInputError(
                 f"observation_id must be the latest id {self.latest_observation_id!r}"
             )
-        decision = self._validate_decision(arguments["decision_record"])
-        command.update(
-            {
-                "observation_id": observation_id,
-                "rationale": (
-                    f"{decision['rationale']} Exact-parameter basis: "
-                    f"{decision['parameter_rationale']}"
-                ),
-            }
-        )
+        command["observation_id"] = observation_id
         if spec.name == "step_eef":
             position = self._vector3(arguments["delta_position"], "delta_position")
             rotation = self._vector3(arguments["delta_rpy"], "delta_rpy")
@@ -386,66 +296,7 @@ class BenchmarkCapabilityGateway:
                     "delta_gripper": gripper,
                 }
             )
-        elif spec.name == "finish_episode":
-            command["final_note"] = self._nonempty(arguments["final_note"], "final_note")
         return command, decision
-
-    def _validate_decision(self, value: Any) -> JsonDict:
-        if not isinstance(value, dict):
-            raise ToolInputError("decision_record must be an object")
-        required = {
-            "evidence",
-            "alternatives_considered",
-            "uncertainty",
-            "expected_effect",
-            "parameter_rationale",
-            "rationale",
-        }
-        if set(value) != required:
-            raise ToolInputError("decision_record fields do not match the published schema")
-        evidence = value["evidence"]
-        if not isinstance(evidence, list) or not evidence:
-            raise ToolInputError("decision_record.evidence must be a non-empty array")
-        allowed_sources = set(
-            _evidence_sources(
-                self.profile,
-                self.annotations,
-                self.icl_condition,
-            )
-        )
-        normalized_evidence: list[JsonDict] = []
-        for item in evidence:
-            if not isinstance(item, dict) or set(item) != {"source", "finding", "implication"}:
-                raise ToolInputError("Each evidence item must match the published schema")
-            source = item["source"]
-            if source not in allowed_sources:
-                raise ToolInputError(f"Evidence source {source!r} is unavailable")
-            normalized_evidence.append(
-                {
-                    "source": source,
-                    "finding": self._nonempty(item["finding"], "evidence.finding"),
-                    "implication": self._nonempty(item["implication"], "evidence.implication"),
-                }
-            )
-        alternatives = value["alternatives_considered"]
-        if not isinstance(alternatives, list) or not alternatives:
-            raise ToolInputError("alternatives_considered must be a non-empty array")
-        uncertainty = self._finite(value["uncertainty"], "uncertainty")
-        if not 0.0 <= uncertainty <= 1.0:
-            raise ToolInputError("uncertainty must be in [0, 1]")
-        return {
-            "evidence": normalized_evidence,
-            "alternatives_considered": [
-                self._nonempty(item, "alternatives_considered item")
-                for item in alternatives
-            ],
-            "uncertainty": uncertainty,
-            "expected_effect": self._nonempty(value["expected_effect"], "expected_effect"),
-            "parameter_rationale": self._nonempty(
-                value["parameter_rationale"], "parameter_rationale"
-            ),
-            "rationale": self._nonempty(value["rationale"], "rationale"),
-        }
 
     def _assert_no_leak(self, response: JsonDict) -> None:
         terminal = response.get("status") == "rollout_finished"

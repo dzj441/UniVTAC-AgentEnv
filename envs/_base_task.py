@@ -17,6 +17,8 @@ import carb
 import omni.ui
 import logging
 from contextlib import suppress
+
+from agent_env.eef_control import classify_delta_eef_action
 from isaacsim.core.api.objects import VisualCuboid
 from isaacsim.core.prims import XFormPrim
 with suppress(ImportError):
@@ -237,6 +239,7 @@ class BaseTask(UipcRLEnv):
         self.take_action_cnt = 0
         self.plan_success = True
         self.eval_success = False
+        self.last_delta_ee_route = None
         self.in_pre_move = False
         self.last_qpos = None
         self.keep_still_times = 0
@@ -879,22 +882,50 @@ class BaseTask(UipcRLEnv):
                 Action(action='all', target_pose=target_pose, target_gripper_pos=target_gripper_pos)
             ], delay=False)
         elif action_type == 'delta_ee':
-            ee_pose = self._robot_manager.get_ee_pose()
-            # agentic team comment: Keep world XYZ and world RPY deltas
-            # agentic team comment: independent; legacy add_rotation(world)
-            # agentic team comment: also orbits position about the world origin.
-            ee_next_pose = (
-                ee_pose.add_bias(action[:3], coord='world')
-                .add_orientation_delta(
-                    euler=action[3:6].tolist(),
-                    frame='world',
+            route = classify_delta_eef_action(action[:3], action[3:6], action[6])
+            self.last_delta_ee_route = route.name
+            self._robot_manager.clear_last_arm_plan_diagnostics()
+
+            ee_next_pose = None
+            if route.arm_changed:
+                ee_pose = self._robot_manager.get_ee_pose()
+                # agentic team comment: Keep world XYZ and world RPY deltas
+                # agentic team comment: independent; legacy add_rotation(world)
+                # agentic team comment: also orbits position about the world origin.
+                ee_next_pose = (
+                    ee_pose.add_bias(action[:3], coord='world')
+                    .add_orientation_delta(
+                        euler=action[3:6].tolist(),
+                        frame='world',
+                    )
                 )
-            )
-            gripper_pos = self._robot_manager.get_gripper_qpos()
-            gripper_next_pos = gripper_pos + action[6]
-            exec_success = self.move([
-                Action(action='all', target_pose=ee_next_pose, target_gripper_pos=gripper_next_pos)
-            ], delay=False)
+
+            gripper_next_pos = None
+            if route.gripper_changed:
+                gripper_next_pos = (
+                    self._robot_manager.get_gripper_qpos() + float(action[6])
+                )
+
+            if route.name == 'all':
+                exec_success = self.move([
+                    Action(
+                        action='all',
+                        target_pose=ee_next_pose,
+                        target_gripper_pos=gripper_next_pos,
+                    )
+                ], delay=False)
+            elif route.name == 'move':
+                exec_success = self.move([
+                    Action(action='move', target_pose=ee_next_pose)
+                ], delay=False)
+            elif route.name == 'gripper':
+                exec_success = self.move([
+                    Action(action='gripper', target_gripper_pos=gripper_next_pos)
+                ], delay=False)
+            else:
+                # agentic team comment: A zero delta is a deterministic wait
+                # agentic team comment: and must not invoke either planner.
+                exec_success = self.delay(steps=20, is_save=False, force=True)
         else:
             self._robot_manager.set_arm(action[:-1], force=force)
             self._robot_manager.set_gripper(action[-1], force=force)

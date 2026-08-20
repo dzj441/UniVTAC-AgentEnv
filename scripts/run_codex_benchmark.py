@@ -67,17 +67,9 @@ from agent_env.stdio_bridge import SimulatorProcessClient  # noqa: E402
 
 
 BASE_INSTRUCTIONS = """\
-You are the control policy in an agentic embodied benchmark. The host owns the
-simulator and exposes three typed embodied tools. Robot interaction must use
-only start_episode, step_eef, and finish_episode. General runtime capabilities
-may be used to inspect or transform the public benchmark inputs and to support
-reasoning, but they do not provide a second simulator-control path.
-
-All externally meaningful reasoning must be placed in each tool's structured
-decision_record. Cite only public sources accepted by that tool's schema. Task
-success is available only from finish_episode. The host records published
-reasoning summaries and agent messages, but hidden model reasoning is not an
-observable benchmark artifact.
+Control the robot through start_episode, step_eef, and finish_episode. General
+runtime capabilities may be used freely, but they do not provide another robot-
+control path. Task success is returned only by finish_episode.
 """
 
 DEVELOPER_INSTRUCTIONS = """\
@@ -98,16 +90,7 @@ def operator_prompt(
     task = get_benchmark_task(task_name)
     if interaction_mode not in {"single_turn", "action_per_turn"}:
         raise ValueError(f"Unsupported interaction mode: {interaction_mode!r}")
-    prompt = (
-        f"Task: {task.name}\n\n"
-        f"{task.instruction_for(pre_move=pre_move)}\n\n"
-        "Execute exactly one episode. Begin with start_episode, operate only "
-        "through step_eef, and call finish_episode when you judge the best "
-        "attainable terminal state has been reached. Use only information made "
-        "available in this run.\n"
-    )
-    if interaction_mode == "single_turn":
-        prompt += "Do not end the turn while the episode is active.\n"
+    prompt = task.instruction_for(pre_move=pre_move) + "\n"
     if icl_condition.fixed_demo_available:
         prompt += (
             "\nA verified successful demonstration is available at "
@@ -168,7 +151,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--interaction-mode",
         choices=("single_turn", "action_per_turn"),
-        default="single_turn",
+        default="action_per_turn",
         help=(
             "single_turn returns observations inside dynamic-tool results; "
             "action_per_turn keeps one Codex thread but delivers each resulting "
@@ -194,8 +177,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--codex-network-access",
-        action="store_true",
-        help="Allow network access for general Codex tools and record that condition.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Evaluator-controlled network policy for general Codex tools; enabled "
+            "by default and recorded in the run manifest."
+        ),
     )
     parser.add_argument("--timeout-seconds", type=float, default=3600.0)
     parser.add_argument("--dry-run", action="store_true")
@@ -576,7 +563,7 @@ def main() -> int:
                 "recording": {
                     "published_codex_events": "codex_app_server_events.jsonl",
                     "tool_calls": "codex_tool_calls.jsonl",
-                    "explicit_decisions": "codex_decisions.jsonl",
+                    "structured_decisions": "not required by the embodied tool schema",
                     "published_messages_and_reasoning_summaries": "codex_messages.jsonl",
                     "simulator_transcript": "agent_transcript.jsonl",
                     "sensor_video": "agent_observations_h264.mp4",
@@ -672,7 +659,6 @@ def main() -> int:
                     {
                         "command": "close",
                         "observation_id": gateway.latest_observation_id,
-                        "rationale": "Host-owned cleanup after terminal evaluation.",
                     }
                 )
                 simulator.wait(timeout_seconds=120.0)

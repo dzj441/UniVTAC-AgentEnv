@@ -19,7 +19,6 @@ class CommandFields:
 COMMAND_FIELDS: dict[str, CommandFields] = {
     "start": CommandFields(
         required=frozenset({"command"}),
-        optional=frozenset({"agent_note", "rationale"}),
     ),
     "step": CommandFields(
         required=frozenset(
@@ -29,13 +28,11 @@ COMMAND_FIELDS: dict[str, CommandFields] = {
                 "delta_position",
                 "delta_rpy",
                 "delta_gripper",
-                "rationale",
             }
         )
     ),
     "finish": CommandFields(
-        required=frozenset({"command", "observation_id", "final_note"}),
-        optional=frozenset({"rationale"}),
+        required=frozenset({"command", "observation_id"}),
     ),
     # Host-owned cleanup command.  It is accepted by the stdio bridge only
     # after terminal evaluation and is never registered as an agent tool.
@@ -83,8 +80,6 @@ def public_benchmark_command_schema() -> dict[str, Any]:
             "required": ["command"],
             "properties": {
                 "command": {"const": "start"},
-                "agent_note": {"type": "string"},
-                "rationale": text,
             },
         },
         {
@@ -107,7 +102,6 @@ def public_benchmark_command_schema() -> dict[str, Any]:
                     **number,
                     "description": "Per-finger gripper-qpos delta in metres.",
                 },
-                "rationale": text,
             },
         },
         {
@@ -118,8 +112,6 @@ def public_benchmark_command_schema() -> dict[str, Any]:
             "properties": {
                 "command": {"const": "finish"},
                 "observation_id": text,
-                "final_note": text,
-                "rationale": text,
             },
         },
     ]

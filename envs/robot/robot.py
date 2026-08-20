@@ -2,6 +2,8 @@ import yaml
 import numpy as np
 import torch
 
+from agent_env.eef_control import motion_gen_result_diagnostics
+
 import isaaclab.sim as sim_utils
 import isaaclab.utils.math as math_utils
 from isaaclab.assets import Articulation, ArticulationCfg
@@ -38,6 +40,7 @@ class RobotManager:
         self.gripper_max_qpos = 0.039
         self.last_arm_velocity = None
         self.last_gripper_velocity = None
+        self.last_arm_plan_diagnostics = None
 
         if self.robot_type == 'franka_panda':
             self.hand_name = 'panda_hand'
@@ -159,7 +162,8 @@ class RobotManager:
             constraint_pose=constraint_pose,
             time_dilation_factor=time_dilation_factor
         )
-        
+
+        self.last_arm_plan_diagnostics = motion_gen_result_diagnostics(result)
         if result.success.item():
             return {
                 'status': 'Success',
@@ -169,6 +173,9 @@ class RobotManager:
             }
         else:
             return {'status': 'Fail', 'num_steps': 0, 'position': None, 'velocity': None}
+
+    def clear_last_arm_plan_diagnostics(self):
+        self.last_arm_plan_diagnostics = None
 
     def gripper_percent2qpos(self, percentage:float):
         gripper_range = [0, self.gripper_max_qpos]

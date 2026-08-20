@@ -296,13 +296,6 @@ class EmbodiedAgentEnv:
     def _record_private(self, kind: str, payload: dict[str, Any]) -> None:
         self._private_events.append({"timestamp_utc": utc_now(), "kind": kind, **payload})
 
-    @staticmethod
-    def _require_rationale(command: dict[str, Any]) -> str:
-        rationale = str(command.get("rationale", "")).strip()
-        if not rationale:
-            raise ValueError("Every step_eef decision requires a non-empty rationale")
-        return rationale
-
     def _next_observation_id(self) -> str:
         value = f"obs_{self._observation_index:03d}"
         self._observation_index += 1
@@ -514,7 +507,6 @@ class EmbodiedAgentEnv:
         }
 
     def step(self, command: dict[str, Any]) -> dict[str, Any]:
-        rationale = self._require_rationale(command)
         dp, dr, dg = self.protocol.prepare_step(
             observation_id=command.get("observation_id"),
             delta_position=command.get("delta_position"),
@@ -544,12 +536,17 @@ class EmbodiedAgentEnv:
                 "after_observation_id": observation_id,
                 "base_task_checker_value": bool(private_checker_value),
                 "execution_succeeded": bool(execution_succeeded),
+                "control_route": getattr(self.task, "last_delta_ee_route", None),
+                "curobo_motion_gen": getattr(
+                    self.task._robot_manager,
+                    "last_arm_plan_diagnostics",
+                    None,
+                ),
             },
         )
         return {
             "status": "action_complete",
             "prior_observation_id": prior_observation_id,
-            "rationale": rationale,
             "action": {
                 "primitive": "bounded_step_eef",
                 "delta_position_world_m": dp.tolist(),
@@ -562,9 +559,6 @@ class EmbodiedAgentEnv:
         }
 
     def finish(self, command: dict[str, Any]) -> dict[str, Any]:
-        final_note = str(command.get("final_note", "")).strip()
-        if not final_note:
-            raise ValueError("finish requires a non-empty final_note")
         current_observation_id = command.get("observation_id")
         self.protocol.finish(current_observation_id)
         manipulated = self.task._actor_manager.actors[
@@ -629,7 +623,6 @@ class EmbodiedAgentEnv:
             "sim_action_count": int(self.task.take_action_cnt),
             "wall_seconds": time.perf_counter() - self._rollout_start_time,
             "final_observation_id": final_observation_id,
-            "final_note": final_note,
             "seed_reveal": self._secret_seed,
             "salt_reveal": self._secret_salt,
             "seed_commitment_sha256": self.seed_commitment,

@@ -74,8 +74,8 @@ Head、wrist、左右 tactile 图按 Level/Profile 实际开放的模态显示�
 - `codex_app_server_events.jsonl`：Viewer 的主要 Agent activity 数据源；从中读取公开
   reasoning summary、agent message、命令/输出、文件、MCP、子 Agent、网络与图像事件；
 - `codex_messages.jsonl`：旧 run 缺少原始 App Server stream 时的兼容 fallback；
-- `codex_decisions.jsonl`：保留为历史审计产物，但 Viewer 不读取其 rationale 来构造
-  Agent 思考过程；
+- `codex_decisions.jsonl`：仅旧 schema run 可能存在的历史审计产物；Viewer 不读取其
+  rationale 来构造 Agent 思考过程；
 - `codex_tool_calls.jsonl`：实际工具参数、仿真命令、反馈和 observation 转移；
 - `semantic_perception/`：SAM mask/overlay/contact sheet 与 UniDepth depth/confidence
   产物；它们是当前公开 RGB 的派生结果，不是新的 simulator observation；
@@ -94,7 +94,7 @@ Head、wrist、左右 tactile 图按 Level/Profile 实际开放的模态显示�
 Viewer 展示 App Server 实际发布和执行的完整可观察事件序列，包括 reasoning summary、
 agent message、shell、代码/文件修改、MCP、子 Agent、网络/搜索、图像查看、context
 compaction、机器人 tool call 及其结果。它不依赖 Agent 在工具参数中另填 rationale 或
-`decision_record`，因此未来精简工具 schema 不会破坏 Viewer。
+`decision_record`；generic v1 已移除这些强制字段，Viewer 无需兼容性改造。
 
 这里的“完整”严格限定为完整的**可观察事件流**。模型没有通过 App Server 发布的隐藏
 chain-of-thought 只有 token 计数，没有可供 Viewer 恢复的文本；页面不会推断或伪造它。

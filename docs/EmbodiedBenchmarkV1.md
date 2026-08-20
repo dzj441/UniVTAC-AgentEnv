@@ -97,6 +97,12 @@ Bottle 的 release 阈值为 gripper qpos `>= 0.0175 m`；稳定要求 60 steps 
 2. `step_eef`
 3. `finish_episode`
 
+工具参数保持为最小控制协议：`start_episode` 不带参数，`step_eef` 只带最新
+`observation_id` 和四项动作数值，`finish_episode` 只带最新 `observation_id`。v1 不再要求
+`rationale`、`decision_record`、`agent_note` 或 `final_note`。Agent 的公开 reasoning summary、
+消息、shell/文件/MCP/子 Agent/网络/图像等活动直接从 App Server 事件流记录，不要求模型
+把推理压缩、改写或重复填入机器人 tool call。
+
 `step_eef` 使用世界坐标系 XYZ/RPY 增量和夹爪增量：
 
 | 参数 | 边界 |
@@ -107,9 +113,34 @@ Bottle 的 release 阈值为 gripper qpos `>= 0.0175 m`；稳定要求 60 steps 
 | Gripper delta | `abs <= 0.005 m` |
 | Accepted `step_eef` 数量 | 最多 50 |
 
-全零动作合法，可用于等待物理稳定。每个 step 必须引用最新 `observation_id`；陈旧 ID、
+`step_eef` 按实际非零分量路由：仅 EEF 改变时使用 `move`，仅 gripper 改变时使用
+`gripper`，两者都改变时才使用 `all`。全零动作合法，并以不调用 arm/gripper planner 的
+固定 20 physics steps wait 等待物理稳定。这样纯夹爪和 wait 不会因为无关的 cuRobo arm
+planning failure 而被拒绝。每个 step 必须引用最新 `observation_id`；陈旧 ID、
 未知字段、非有限数和越界动作在改变世界之前被拒绝。接口不返回目标方向、目标半空间、
 语义动作提示、actor pose、IK/joint target 或过程 task success。
+
+每个 arm planning 结果的原始 cuRobo status、query validity、attempt 数、timing 和终端误差
+仅写入终局生成且权限为 `0600` 的 evaluator-private audit。Agent-visible response 仍只有
+`execution_succeeded` 布尔值，不公开 collision、IK、trajectory optimization 或 planner
+内部状态。
+
+真实路由验收 `bottle_curobo_routing_smoke_seed_1830315042` 复用了 Formal16 Bottle P1 的
+前两次下降：第一次 arm-only `z=-0.04 m` 成功，第二次到 `z≈0.219 m` 的目标被精确记录为
+`MotionGenStatus.IK_FAIL`、`valid_query=true`、`attempts=10`。失败后紧接的纯 gripper 动作
+未调用 cuRobo，并把 gripper width 从约 `0.040 m` 改为 `0.030 m`；随后的全零动作同样未
+调用 planner，并恰好推进 20 physics steps。private audit 权限为 `0600`，planner status 与
+逐步 control route 在 manifest、public transcript 和 evaluator outcome 中均未出现。
+
+完整 Codex A/B smoke `bottle_p1_curobo_fix_smoke_seed_1830315042` 又以 Formal16 Bottle P1
+相同 seed、P1、无 annotation、无 ICL、同一 `gpt-5.6-sol/high` 与 action-per-turn 条件跑满
+一轮。旧 run 的 21 个 step 中 12 次执行失败、最长连续失败 11 次；修复后 49 个 step 中
+7 次失败、最长连续失败 3 次。修复后 18 个 gripper-only、1 个 all 和 1 个 no-op 全部成功，
+7 次失败全部来自 move，private status 为 5 次 `IK_FAIL` 和 2 次
+`FINETUNE_TRAJOPT_FAIL`。其中三次 move 连败后，全零 20-step settle 成功，紧接的同方向
+退升也成功；另有多组 move 拒绝后纯夹爪立即成功。该 run 最终仍未完成 Bottle，因此证明的
+是动作路由和恢复语义已经生效，不是 P1 policy 或 Bottle 任务已经解决。Codex 生成具有
+随机性，A/B 的总 step 数不能单独作因果证据；逐 route 的 planner/bypass 记录才是验收依据。
 
 ### StepEEF 世界旋转与 legacy Pose 旋转
 
@@ -222,12 +253,18 @@ UNIVTAC_FIXED_EXPERT_MASTER_ROOT=/path/to/expert_observation_master \
 
 Generic v1 runner 为每次 rollout 创建干净的临时 workspace，但继承评测方的正常
 `CODEX_HOME` 配置，也不再通过启动参数禁用 shell、文件、`view_image`、MCP/app、skill、
-subagent 等通用能力。Sandbox 与网络策略由 `--codex-sandbox` 和
-`--codex-network-access` 选择并写入 manifest；Benchmark core 不把通用工具使用判为
-capability violation。`danger-full-access` 本身不施加 Codex 网络 sandbox，因此 manifest
-会把其有效网络权限记为允许，即使未额外给出网络开关。机器人控制仍只能经过
+subagent 等通用能力。默认保留 `workspace-write` 临时 workspace 隔离并允许网络；评测方可
+用 `--codex-sandbox`、`--no-codex-network-access` 或显式
+`--codex-network-access` 覆盖并把条件写入 manifest。Benchmark core 不把通用工具使用判为
+capability violation。`danger-full-access` 本身不施加 Codex 网络 sandbox。机器人控制仍只能经过
 `start_episode`、`step_eef`、`finish_episode` 三个 host 校验的 dynamic tools，通用工具
 不会获得第二条仿真控制通路。
+
+Operator prompt 默认只包含当前 task instruction；`icl=fixed_demo` 时额外增加一句已验证
+示范目录提示，配置显式 token budget 时才再增加预算声明。非策略性的三工具生命周期和
+task-success 终局可见性放在 base instruction/tool description 中。prompt 不再要求 Agent
+“只能使用本 run 信息”，也不要求结构化 rationale。Reference runner 默认使用
+`action_per_turn`；`single_turn` 仅保留为显式兼容/诊断选项。
 
 在线 RGB、触觉、depth preview 与首帧 annotation overlay 由 Agent transport 主动发送。
 无法作为 image content 传输的米制 `.npy` depth 与 raw mask 只发布到
@@ -247,9 +284,9 @@ Codex 在整个 episode 中始终使用一个连续 thread。Runner 支持两种
 `action_per_turn` 不创建新 session、thread 或 simulator episode，也不改变 50-step 动作
 预算；它只把 observation/action 的环境边界映射为自然的对话 turn 边界。每个 turn 在
 机器人动作前仍可使用 evaluator 允许的 shell、图片、MCP 等通用能力。所有已发布
-reasoning summary、agent message、shell/文件/MCP/子 Agent/网络/图像活动、显式
-decision record、tool call、环境响应和 observation 都落盘。Viewer 直接从 App Server
-事件流重建完整可观察活动，不依赖 decision record；隐藏 chain-of-thought 不在 Codex
+reasoning summary、agent message、shell/文件/MCP/子 Agent/网络/图像活动、tool call、
+环境响应和 observation 都落盘。Viewer 直接从 App Server 事件流重建完整可观察活动；新
+v1 run 不生成结构化 decision stream，旧 run 的 decision record 仅作为历史兼容产物。隐藏 chain-of-thought 不在 Codex
 协议中公开。旧 v0 `grasp_classify` runner 仍保持自身的严格隔离策略，见
 [`CodexAgentRunner.md`](CodexAgentRunner.md)。
 
@@ -290,7 +327,8 @@ P6 rollout 的成功轨迹分布校准，再将两个名字映射到冻结的数
 - `evaluator_private_audit.json`：终局才生成、权限 0600 的 host 审计。
 
 Codex run 还包含 `codex_app_server_events.jsonl`、`codex_messages.jsonl`、
-`codex_decisions.jsonl`、`codex_tool_calls.jsonl`、`CODEX_TRACE.md` 和 agent timeline MP4。
+`codex_tool_calls.jsonl`、`CODEX_TRACE.md` 和 agent timeline MP4。旧 schema run 还可能包含
+`codex_decisions.jsonl`；rationale-free v1 run 不要求也不创建该文件。
 `icl=fixed_demo` 时还会在 evaluator run directory 中保存
 `icl_projection_receipt.json`，用于认证所用 master 与 public bundle 哈希；该 receipt 不会
 放入 Agent workspace。运行 manifest 同时记录 ICL 条件、通用 capability 策略、sandbox、

@@ -115,6 +115,13 @@ class BenchmarkEpisodeProtocol:
                 "max_abs_rotation_component_rad": self.MAX_ROTATION_COMPONENT_RAD,
                 "max_abs_gripper_delta_m": self.MAX_GRIPPER_DELTA_M,
                 "zero_delta_allowed": True,
+                "zero_delta_behavior": "wait_20_physics_steps_without_planning",
+                "control_routing": {
+                    "arm_only": "move",
+                    "gripper_only": "gripper",
+                    "arm_and_gripper": "all",
+                    "all_zero": "no_op_wait",
+                },
             },
             "task_success_visibility": "terminal finish_episode response only",
         }

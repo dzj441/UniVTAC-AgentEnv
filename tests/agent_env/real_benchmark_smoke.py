@@ -245,7 +245,7 @@ def main() -> None:
         private_audit = run_dir / "evaluator_private_audit.json"
         assert not private_audit.exists()
 
-        client.send({"command": "start", "agent_note": "full-feature real smoke"})
+        client.send({"command": "start"})
         started = client.result("rollout_started")
         assert started["start_condition"] == ready["start_condition"]
         initial_gripper_width = started["observation"]["robot_state"]["gripper_width_m"]
@@ -271,7 +271,6 @@ def main() -> None:
                 "delta_position": [0, 0, 0],
                 "delta_rpy": [0, 0, 0],
                 "delta_gripper": 0,
-                "rationale": "Acceptance test advances one bounded zero-delta EEF cycle.",
             }
         )
         stepped = client.result("action_complete")
@@ -290,7 +289,6 @@ def main() -> None:
             {
                 "command": "finish",
                 "observation_id": stepped["observation"]["observation_id"],
-                "final_note": "Full-feature real smoke reached terminal evaluation.",
             }
         )
         outcome = client.result("rollout_finished")
