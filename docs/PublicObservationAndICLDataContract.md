@@ -122,8 +122,8 @@ PublicObservationFrame
 `start_episode` returns `obs_000`. Every accepted `step_eef` returns a fresh
 observation. `finish_episode` may return a final post-settle observation and is
 the only response allowed to reveal terminal success. Its Agent-visible result
-contains the official success bit but not evaluator/checker diagnostics; detailed
-terminal checks remain evaluator-private.
+contains the official success bit but not evaluator/checker diagnostics or the
+seed/salt commitment opening; those terminal details remain evaluator-private.
 
 Current state, calibration, annotations, and relative artifact references are
 included in the JSON tool result. Current visual modalities are also sent as
@@ -201,6 +201,69 @@ The physical files are:
 Large numeric depth arrays are never embedded in JSON. Artifact metadata
 records relative path, SHA-256, media type, dtype, shape, unit, validity rule,
 and visualization range as applicable.
+
+### Known wrist-depth limitation: deformable GelSight pads
+
+As of 2026-08-20, P5/P6 wrist depth has a known simulator-rendering
+limitation around the deformable GelSight pads. In the reviewed
+`pull_out_key` P6 rollout (`07_key_p6`), the gripper remained closed according
+to both finger joints and `gripper_width_m`, and RGB/depth landmarks from the
+rigid scene remained synchronized. However, pixels occupied by the black
+GelSight pads in wrist RGB returned the depth of geometry behind the pads in
+`depth_m.npy`. After the key was lifted, this made the depth preview resemble
+an open gripper even though the pads were still closed on the key.
+
+The clearest retained regression anchor is
+`formal16_b21184e_seed_1830315042/07_key_p6/obs_012`. In wrist RGB, the two
+black pad regions occupy approximately `x=215--230` and `x=254--272`. Their
+corresponding raw-depth medians are about `0.266 m`, while the same pad-shaped
+regions before the lift in `obs_009` are about `0.124 m`. The rigid gripper
+cases, key, and fixture remain spatially aligned across RGB and depth. This
+isolates the discrepancy to the gelpad regions and establishes that it exists
+in `depth_m.npy`, not only in the colorized preview.
+
+The initial frames can look correct by coincidence: the fixture or key behind
+the pads is at a similar range, and the preview is independently normalized
+per frame using its 1st and 99th depth percentiles. Once the gripper moves away
+from the fixture, the background becomes farther and the see-through region is
+visually obvious. This is not evidence of a stale RGB/depth pair or an open
+command.
+
+A source-history audit rules out the AgentEnv serializer as the origin of the
+metric values. The public P5/P6 path copies
+`camera.data.output["depth"]` into `depth_m.npy` after only removing singleton
+camera dimensions and casting to `float32`. Wrist `TiledCamera` depth capture,
+the UIPC render-mesh update, and their update order have existed since the
+initial UniVTAC commit `b371b18`; the later camera-mount commit `c0e6a64` only
+changed the camera and visible housing poses. It can make the pads easier to
+see, but it did not change the depth annotator or deformable mesh path.
+
+The strongest current attribution is therefore the TacEx/UIPC--Isaac
+Sim/Fabric--IsaacLab `TiledCamera` integration boundary, rather than the
+benchmark exporter. TacEx updates each deformable surface by writing its point
+array into a Fabric mesh. Its
+[upstream implementation](https://github.com/DH-Ng/TacEx/blob/main/source/tacex_uipc/tacex_uipc/sim/uipc_sim.py#L268-L284)
+explicitly documents a one-frame rendering delay and performs an extra render
+only to "somewhat mitigate" it. A 2026-08-20 audit of all open and closed
+UniVTAC and TacEx GitHub issues found no exact report of RGB-visible gelpads
+being absent from metric depth. Related IsaacLab reports do establish that
+TiledCamera/Fabric can expose
+stale or missing dynamic geometry, including
+[a wrist TiledCamera that did not follow its robot](https://github.com/isaac-sim/IsaacLab/issues/745)
+and [renderer-side omission of dynamically driven links](https://github.com/isaac-sim/IsaacLab/issues/6625),
+but neither is an exact reproduction of this gelpad-depth failure. The precise
+owning component remains unproven until a minimal UIPC pad test compares
+`TiledCamera` with ordinary `Camera` and Fabric with a USD-synchronized path.
+
+This limitation is currently deferred rather than silently corrected. Before
+depth-sensitive benchmark conclusions are frozen, a focused simulator probe
+should determine whether the UIPC gelpad render mesh is omitted by the camera
+depth annotator. Candidate resolutions are to make that mesh participate in
+metric depth, or to mark affected pixels invalid with an explicit confidence
+mask. A fixed wrist-preview display range may improve temporal readability but
+does not repair the underlying metric-depth inconsistency. Add a regression in
+which a closed gripper is moved through free space and its pad depth remains
+constant in the wrist-camera frame.
 
 ## Profile projection
 

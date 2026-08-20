@@ -52,6 +52,27 @@ TRANSCRIPT_TOOL_NAMES = {
     "status": "inspect_episode_status",
 }
 
+ACTIVITY_LABELS = {
+    "reasoning": "公开 reasoning summary",
+    "agent_message": "Agent message",
+    "command_execution": "Shell / command execution",
+    "file_change": "File change",
+    "mcp_tool_call": "MCP tool call",
+    "collab_tool_call": "Collaboration tool call",
+    "collab_agent_tool_call": "Collaboration tool call",
+    "sub_agent_activity": "Sub-agent activity",
+    "web_search": "Web search",
+    "image_view": "Image view",
+    "image_generation": "Image generation",
+    "context_compaction": "Context compaction",
+    "plan": "Plan update",
+    "sleep": "Wait / sleep",
+    "app_server_error": "App Server error",
+}
+
+_ACTIVITY_TEXT_LIMIT = 24_000
+_ACTIVITY_COLLECTION_LIMIT = 200
+
 STATIC_FILENAMES = frozenset({"index.html", "app.js", "styles.css", "favicon.svg"})
 
 
@@ -354,6 +375,228 @@ def _normalize_message(record: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _snake_case(value: str) -> str:
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", value).lower()
+
+
+def _bounded_activity_text(value: str) -> str:
+    if len(value) <= _ACTIVITY_TEXT_LIMIT:
+        return value
+    head_length = _ACTIVITY_TEXT_LIMIT * 2 // 3
+    tail_length = _ACTIVITY_TEXT_LIMIT - head_length
+    omitted = len(value) - _ACTIVITY_TEXT_LIMIT
+    return (
+        value[:head_length]
+        + f"\n\n... <viewer omitted {omitted} characters; raw App Server log is intact> ...\n\n"
+        + value[-tail_length:]
+    )
+
+
+def _bounded_activity_value(value: Any, *, depth: int = 0) -> Any:
+    """Bound UI payload size without changing the append-only source log."""
+
+    if isinstance(value, str):
+        return _bounded_activity_text(value)
+    if depth >= 8:
+        return "<viewer nesting limit reached>"
+    if isinstance(value, list):
+        output = [
+            _bounded_activity_value(child, depth=depth + 1)
+            for child in value[:_ACTIVITY_COLLECTION_LIMIT]
+        ]
+        if len(value) > _ACTIVITY_COLLECTION_LIMIT:
+            output.append(
+                f"<viewer omitted {len(value) - _ACTIVITY_COLLECTION_LIMIT} list items>"
+            )
+        return output
+    if isinstance(value, dict):
+        items = list(value.items())
+        output = {
+            str(key): _bounded_activity_value(child, depth=depth + 1)
+            for key, child in items[:_ACTIVITY_COLLECTION_LIMIT]
+        }
+        if len(items) > _ACTIVITY_COLLECTION_LIMIT:
+            output["<viewer_omitted_fields>"] = len(items) - _ACTIVITY_COLLECTION_LIMIT
+        return output
+    return value
+
+
+def _activity_parts(value: Any) -> list[str]:
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, str) and item.strip():
+                parts.append(item.strip())
+            elif isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str) and text.strip():
+                    parts.append(text.strip())
+        return parts
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
+def _activity_from_item(
+    record: dict[str, Any],
+    item: dict[str, Any],
+    *,
+    lifecycle: str,
+) -> dict[str, Any] | None:
+    item_type = item.get("type")
+    if not isinstance(item_type, str) or item_type in {"userMessage", "dynamicToolCall"}:
+        return None
+    kind = _snake_case(item_type)
+    parts: list[str] = []
+    title: str | None = None
+    details: dict[str, Any] | None = None
+
+    if item_type == "reasoning":
+        # App Server deliberately publishes the summary separately from hidden
+        # reasoning content.  Only the published summary belongs in the viewer.
+        parts = _activity_parts(item.get("summary"))
+    elif item_type == "agentMessage":
+        parts = _activity_parts(item.get("text"))
+    elif item_type == "commandExecution":
+        command = item.get("command")
+        title = command if isinstance(command, str) else "Command execution"
+        details = {
+            key: child
+            for key, child in item.items()
+            if key not in {"id", "type", "command"}
+        }
+    elif item_type == "imageView":
+        path = item.get("path")
+        title = path if isinstance(path, str) else "Image view"
+    elif item_type == "contextCompaction":
+        parts = ["The Agent context was compacted within the same Codex thread."]
+    else:
+        title_value = (
+            item.get("tool")
+            or item.get("name")
+            or item.get("query")
+            or item.get("path")
+        )
+        if isinstance(title_value, str):
+            title = title_value
+        details = {
+            key: child for key, child in item.items() if key not in {"id", "type"}
+        }
+
+    if not parts and title is None and not details:
+        return None
+    status = item.get("status")
+    if not isinstance(status, str):
+        status = "completed" if lifecycle == "completed" else "in progress"
+    return {
+        "kind": kind,
+        "label": ACTIVITY_LABELS.get(kind, item_type),
+        "item_id": item.get("id"),
+        "status": status,
+        "title": _bounded_activity_text(title) if title is not None else None,
+        "parts": [_bounded_activity_text(part) for part in parts],
+        "details": _bounded_activity_value(details) if details else None,
+        "elapsed_seconds": _as_float(record.get("elapsed_seconds")),
+        "timestamp_utc": record.get("timestamp_utc"),
+        "sequence": record.get("sequence"),
+    }
+
+
+def _normalize_app_server_activity(
+    records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Extract every Agent-visible activity item from raw App Server traffic."""
+
+    completed_ids: set[str] = set()
+    for record in records:
+        message = record.get("message")
+        params = message.get("params") if isinstance(message, dict) else None
+        item = params.get("item") if isinstance(params, dict) else None
+        if (
+            isinstance(message, dict)
+            and message.get("method") == "item/completed"
+            and isinstance(item, dict)
+            and item.get("id") is not None
+        ):
+            completed_ids.add(str(item["id"]))
+
+    output: list[dict[str, Any]] = []
+    for record in records:
+        if record.get("direction") != "server_to_host":
+            continue
+        message = record.get("message")
+        if not isinstance(message, dict):
+            continue
+        method = message.get("method")
+        if method == "error":
+            output.append(
+                {
+                    "kind": "app_server_error",
+                    "label": ACTIVITY_LABELS["app_server_error"],
+                    "item_id": None,
+                    "status": "error",
+                    "title": None,
+                    "parts": [],
+                    "details": _bounded_activity_value(message.get("params")),
+                    "elapsed_seconds": _as_float(record.get("elapsed_seconds")),
+                    "timestamp_utc": record.get("timestamp_utc"),
+                    "sequence": record.get("sequence"),
+                }
+            )
+            continue
+        if method not in {"item/started", "item/completed"}:
+            continue
+        params = message.get("params")
+        item = params.get("item") if isinstance(params, dict) else None
+        if not isinstance(item, dict):
+            continue
+        item_id = str(item.get("id")) if item.get("id") is not None else None
+        if method == "item/started" and item_id in completed_ids:
+            continue
+        activity = _activity_from_item(
+            record,
+            item,
+            lifecycle="completed" if method == "item/completed" else "started",
+        )
+        if activity is not None:
+            output.append(activity)
+    output.sort(
+        key=lambda item: (
+            item["elapsed_seconds"],
+            int(item["sequence"]) if isinstance(item.get("sequence"), int) else -1,
+        )
+    )
+    return output
+
+
+def _message_activity(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Compatibility fallback for runs recorded before the raw event stream."""
+
+    output: list[dict[str, Any]] = []
+    for index, message in enumerate(messages):
+        raw_kind = str(message.get("kind") or "message")
+        kind = {
+            "published_reasoning_summary": "reasoning",
+            "agent_message": "agent_message",
+            "app_server_error": "app_server_error",
+        }.get(raw_kind, _snake_case(raw_kind))
+        output.append(
+            {
+                "kind": kind,
+                "label": ACTIVITY_LABELS.get(kind, raw_kind),
+                "item_id": None,
+                "status": "completed",
+                "title": None,
+                "parts": list(message.get("parts") or []),
+                "details": None,
+                "elapsed_seconds": _as_float(message.get("elapsed_seconds")),
+                "timestamp_utc": message.get("timestamp_utc"),
+                "sequence": index,
+            }
+        )
+    return output
+
+
 def _compact_environment_response(value: Any) -> Any:
     """Remove duplicated images and local absolute paths from a response."""
 
@@ -369,6 +612,20 @@ def _compact_environment_response(value: Any) -> Any:
             continue
         output[key] = _compact_environment_response(child)
     return output
+
+
+def _simulator_execution_succeeded(value: Any) -> bool | None:
+    """Read physical execution status separately from host tool-call success."""
+
+    if not isinstance(value, dict):
+        return None
+    feedback = value.get("feedback")
+    if isinstance(feedback, dict) and isinstance(
+        feedback.get("execution_succeeded"), bool
+    ):
+        return feedback["execution_succeeded"]
+    result = value.get("execution_succeeded")
+    return result if isinstance(result, bool) else None
 
 
 def _numeric_vector(value: Any, length: int) -> list[float] | None:
@@ -432,21 +689,6 @@ def _state_delta(
     return result
 
 
-def _decision_for_call(
-    call: dict[str, Any],
-    decisions: dict[str, dict[str, Any]],
-) -> tuple[dict[str, Any] | None, str | None]:
-    call_id = str(call.get("call_id") or "")
-    validated = decisions.get(call_id, {}).get("decision_record")
-    if isinstance(validated, dict):
-        return validated, "host_validated"
-    arguments = call.get("arguments")
-    submitted = arguments.get("decision_record") if isinstance(arguments, dict) else None
-    if isinstance(submitted, dict):
-        return submitted, "submitted_unvalidated"
-    return None, None
-
-
 def _arguments_without_decision(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
@@ -456,9 +698,14 @@ def _arguments_without_decision(value: Any) -> dict[str, Any]:
 def _build_codex_steps(
     run_dir: Path,
     calls: list[dict[str, Any]],
-    decision_records: list[dict[str, Any]],
     message_records: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    app_server_records: list[dict[str, Any]],
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    dict[str, dict[str, Any]],
+    list[dict[str, Any]],
+]:
     observations: dict[str, dict[str, Any]] = {}
     for call in calls:
         _collect_observations(
@@ -466,17 +713,16 @@ def _build_codex_steps(
             run_dir,
             observations,
         )
-    decisions = {
-        str(record.get("call_id")): record
-        for record in decision_records
-        if record.get("call_id") is not None
-    }
     messages = [message for record in message_records if (message := _normalize_message(record))]
     messages.sort(key=lambda item: item["elapsed_seconds"])
+    activity = _normalize_app_server_activity(app_server_records)
+    if not activity:
+        activity = _message_activity(messages)
     calls = sorted(calls, key=lambda item: _as_float(item.get("elapsed_seconds")))
 
     steps: list[dict[str, Any]] = []
     message_cursor = 0
+    activity_cursor = 0
     for index, call in enumerate(calls):
         call_elapsed = _as_float(call.get("elapsed_seconds"))
         step_messages: list[dict[str, Any]] = []
@@ -486,11 +732,17 @@ def _build_codex_steps(
         ):
             step_messages.append(messages[message_cursor])
             message_cursor += 1
+        step_activity: list[dict[str, Any]] = []
+        while (
+            activity_cursor < len(activity)
+            and activity[activity_cursor]["elapsed_seconds"] <= call_elapsed + 1e-6
+        ):
+            step_activity.append(activity[activity_cursor])
+            activity_cursor += 1
         prior_id = call.get("prior_observation_id")
         next_id = call.get("next_observation_id")
         before = observations.get(str(prior_id)) if prior_id is not None else None
         after = observations.get(str(next_id)) if next_id is not None else None
-        decision, decision_source = _decision_for_call(call, decisions)
         response = call.get("environment_response", call.get("simulator_response"))
         tool = str(call.get("tool") or "unknown")
         steps.append(
@@ -501,6 +753,9 @@ def _build_codex_steps(
                 "tool": tool,
                 "tool_label": TOOL_LABELS.get(tool, tool),
                 "success": call.get("success") is True,
+                "simulator_execution_succeeded": _simulator_execution_succeeded(
+                    response
+                ),
                 "elapsed_seconds": call_elapsed,
                 "duration_seconds": call.get("duration_seconds"),
                 "timestamp_utc": call.get("timestamp_utc"),
@@ -511,8 +766,7 @@ def _build_codex_steps(
                 "fresh_observation": bool(after and next_id != prior_id),
                 "state_delta": _state_delta(before, after),
                 "messages": step_messages,
-                "decision": decision,
-                "decision_source": decision_source,
+                "agent_activity": step_activity,
                 "arguments": _arguments_without_decision(call.get("arguments")),
                 "execution_target": call.get("execution_target")
                 or ("simulator" if call.get("simulator_command") is not None else "rejected"),
@@ -526,7 +780,12 @@ def _build_codex_steps(
                 "derived_artifacts": _collect_derived_artifacts(response, run_dir),
             }
         )
-    return steps, messages[message_cursor:], observations
+    return (
+        steps,
+        messages[message_cursor:],
+        observations,
+        activity[activity_cursor:],
+    )
 
 
 def _build_capture_steps(
@@ -580,6 +839,9 @@ def _build_capture_steps(
                 "tool": tool,
                 "tool_label": TOOL_LABELS.get(tool, tool),
                 "success": "error" not in status.lower(),
+                "simulator_execution_succeeded": _simulator_execution_succeeded(
+                    response
+                ),
                 "elapsed_seconds": elapsed,
                 "duration_seconds": response.get("execution_duration_seconds"),
                 "timestamp_utc": response_timestamp or record.get("timestamp_utc"),
@@ -590,9 +852,7 @@ def _build_capture_steps(
                 "fresh_observation": bool(after and next_id != prior_id),
                 "state_delta": _state_delta(before, after),
                 "messages": [],
-                "decision": None,
-                "decision_source": None,
-                "unstructured_rationale": command.get("rationale"),
+                "agent_activity": [],
                 "arguments": {
                     key: value
                     for key, value in command.items()
@@ -661,6 +921,12 @@ class RunRepository:
         for marker in self.root.rglob("codex_tool_calls.jsonl"):
             directory = self._within_root(marker.parent)
             candidates[directory] = "codex"
+        # Infrastructure failures may terminate before the first tool call while
+        # still producing a complete Codex outcome.  Keep them visible as Codex
+        # runs instead of mislabelling their bridge transcript as a capture.
+        for marker in self.root.rglob("codex_run_outcome.json"):
+            directory = self._within_root(marker.parent)
+            candidates[directory] = "codex"
         for marker in self.root.rglob("agent_transcript.jsonl"):
             directory = self._within_root(marker.parent)
             candidates.setdefault(directory, "capture")
@@ -683,7 +949,12 @@ class RunRepository:
         canonical_id = directory.relative_to(self.root).as_posix()
         if canonical_id != Path(run_id).as_posix():
             raise RunNotFound("Run id is not canonical")
-        kind = "codex" if (directory / "codex_tool_calls.jsonl").is_file() else "capture"
+        kind = (
+            "codex"
+            if (directory / "codex_tool_calls.jsonl").is_file()
+            or (directory / "codex_run_outcome.json").is_file()
+            else "capture"
+        )
         if not (directory / "agent_transcript.jsonl").is_file() and kind != "codex":
             raise RunNotFound(f"Not an AgentEnv run: {run_id}")
         return RunFiles(canonical_id, directory, kind)
@@ -782,6 +1053,14 @@ class RunRepository:
             )
         else:
             tool_count = len(tool_calls)
+        tool_failure_count = sum(call.get("success") is not True for call in tool_calls)
+        simulator_execution_failure_count = sum(
+            _simulator_execution_succeeded(
+                call.get("environment_response", call.get("simulator_response"))
+            )
+            is False
+            for call in tool_calls
+        )
         observation_count = len(
             [path for path in (run.directory / "observations").glob("obs_*") if path.is_dir()]
         ) if (run.directory / "observations").is_dir() else 0
@@ -791,6 +1070,15 @@ class RunRepository:
         parent = Path(run.run_id).parent.as_posix()
         task_manifest = codex_manifest.get("task") or env_manifest.get("task")
         task_manifest = task_manifest if isinstance(task_manifest, dict) else {}
+        annotations = (
+            codex_manifest.get("annotations")
+            or env_manifest.get("annotations")
+            or evaluator.get("annotations")
+            or codex_outcome.get("annotations")
+        )
+        annotations = annotations if isinstance(annotations, dict) else {}
+        icl = codex_manifest.get("icl") or codex_outcome.get("icl")
+        icl = icl if isinstance(icl, dict) else {}
         return {
             "id": run.run_id,
             "name": run.directory.name,
@@ -823,11 +1111,17 @@ class RunRepository:
             "created_utc": created,
             "status": status,
             "valid_for_scoring": codex_outcome.get("valid_for_scoring"),
+            "icl": icl.get("name"),
+            "bbox": annotations.get("bbox") is True,
+            "mask": annotations.get("mask") is True,
             "model": runtime.get("actual_model") or codex_manifest.get("model"),
             "effort": runtime.get("reasoning_effort") or codex_manifest.get("effort"),
             "total_tokens": total_usage.get("totalTokens"),
             "wall_seconds": codex_outcome.get("total_wall_seconds") or evaluator.get("wall_seconds"),
             "tool_count": tool_count,
+            "tool_failure_count": tool_failure_count,
+            "step_eef_count": evaluator.get("step_eef_count"),
+            "simulator_execution_failure_count": simulator_execution_failure_count,
             "message_count": len(messages),
             "observation_count": observation_count,
             "has_video": (run.directory / "agent_observations_h264.mp4").is_file(),
@@ -846,11 +1140,11 @@ class RunRepository:
         codex_outcome = _read_json(run.directory / "codex_run_outcome.json")
         evaluator = _read_json(run.directory / "evaluator_outcome.json")
         if run.kind == "codex":
-            steps, tail_messages, observations = _build_codex_steps(
+            steps, tail_messages, observations, tail_agent_activity = _build_codex_steps(
                 run.directory,
                 _read_jsonl(run.directory / "codex_tool_calls.jsonl"),
-                _read_jsonl(run.directory / "codex_decisions.jsonl"),
                 _read_jsonl(run.directory / "codex_messages.jsonl"),
+                _read_jsonl(run.directory / "codex_app_server_events.jsonl"),
             )
         else:
             steps, observations = _build_capture_steps(
@@ -858,6 +1152,7 @@ class RunRepository:
                 _read_jsonl(run.directory / "agent_transcript.jsonl"),
             )
             tail_messages = []
+            tail_agent_activity = []
         prompt_path = run.directory / "codex_operator_prompt.txt"
         prompt = prompt_path.read_text(encoding="utf-8") if prompt_path.is_file() else None
         profile = _profile_from(codex_manifest, env_manifest)
@@ -886,6 +1181,11 @@ class RunRepository:
             "task_prompt": prompt,
             "steps": steps,
             "tail_messages": tail_messages,
+            "tail_agent_activity": tail_agent_activity,
+            "agent_activity_count": sum(
+                len(step.get("agent_activity", [])) for step in steps
+            )
+            + len(tail_agent_activity),
             "observation_ids": sorted(observations),
             "runtime": {
                 "actual_model": runtime.get("actual_model"),
@@ -899,10 +1199,11 @@ class RunRepository:
             "outcome": _selected_outcome(evaluator),
             "artifacts": artifacts,
             "recording_note": (
-                "展示 Codex 协议公开的 reasoning summary、显式 decision record、"
-                "实际工具调用和环境反馈；不包含模型未公开的隐藏思维链。"
+                "展示 App Server 实际记录的公开 reasoning summary、Agent message、"
+                "shell/文件/MCP/子 Agent/网络/图像等活动、机器人调用和环境反馈；"
+                "不依赖 decision record，也不包含模型未公开的隐藏思维链。"
                 if run.kind == "codex"
-                else "该目录是标准化环境采集，没有 Codex reasoning/decision stream。"
+                else "该目录是标准化环境采集，没有 Codex App Server activity stream。"
             ),
         }
 

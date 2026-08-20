@@ -111,6 +111,48 @@ Bottle 的 release 阈值为 gripper qpos `>= 0.0175 m`；稳定要求 60 steps 
 未知字段、非有限数和越界动作在改变世界之前被拒绝。接口不返回目标方向、目标半空间、
 语义动作提示、actor pose、IK/joint target 或过程 task success。
 
+### 已知的 legacy EEF 旋转语义缺陷
+
+截至 2026-08-20，当前实现尚未完全满足上面的独立 XYZ/RPY 增量契约。
+`BaseTask.take_action(..., action_type="delta_ee")` 先对当前位置加平移，再调用
+`Pose.add_rotation(..., coord="world")`。后者不仅左乘姿态，还对绝对位置应用同一个
+旋转矩阵。因此当前实际目标为：
+
+```text
+p_target = R_delta @ (p_current + delta_p)
+q_target = q_delta * q_current
+```
+
+契约期望的语义则是：
+
+```text
+p_target = p_current + delta_p
+q_target = q_delta * q_current
+```
+
+所以即使 `delta_p == 0`，非零 `delta_rpy` 也会使 EEF 目标绕世界原点发生平移，表现为
+“公转”，而不是保持工具中心点不动的原地旋转。该行为来自 UniVTAC 初始提交
+`b371b18` 中的 `envs/_base_task.py` 与 `envs/utils/transforms.py`；AgentEnv 只是把已有的
+`delta_ee` 路径暴露为 `step_eef`，cuRobo 则规划到已经发生偏移的目标，因此两者都不是
+这次位姿耦合的源头。
+
+对 UniVTAC 全部公开 issue 的审计尚未发现对这一精确缺陷的报告。公开的
+[#6：EE action 训练标签与部署重规划语义不匹配](https://github.com/univtac/UniVTAC/issues/6)
+讨论的是保存的绝对 EEF label 被再次规划而产生绕行，是相邻但不同的问题；它没有指出
+`delta_rpy` 会通过 `R_delta @ p` 改变位置。
+
+该缺陷不要求重新采集当前 fixed-expert 数据。正式专家 HDF5 保存的是 scripted
+expert/cuRobo 产生的状态轨迹，派生 P6 master 也通过 `qpos` replay 采集 observation；二者
+都不包含或执行 `step_eef` action。修复后应对原 frozen HDF5、P6 master 和终局 checker
+做一次回归验证，但无需重新录专家或重新补录 P6。相反，所有执行过非零 `delta_rpy` 的
+旧 AgentEnv rollout 都属于 legacy action semantics，不能与修复后的正式结果直接比较，
+应重新评测。任何未来若保存了 `delta_ee` action 的数据集也必须重新生成，或显式标为
+legacy semantics。
+
+修复时优先只改 `delta_ee` 的目标构造，并增加“纯旋转不改变目标位置”的回归测试；若
+选择全局修改 `Pose.add_rotation(coord="world")`，则还必须审计所有其他调用方，避免改变
+scripted expert 的既有运动语义。
+
 ## 启动环境
 
 从仓库根目录启动一条 P6 + BBox + Mask episode：
@@ -194,9 +236,11 @@ Codex 在整个 episode 中始终使用一个连续 thread。Runner 支持两种
 `action_per_turn` 不创建新 session、thread 或 simulator episode，也不改变 50-step 动作
 预算；它只把 observation/action 的环境边界映射为自然的对话 turn 边界。每个 turn 在
 机器人动作前仍可使用 evaluator 允许的 shell、图片、MCP 等通用能力。所有已发布
-reasoning summary、显式 decision record、tool call、环境响应和图像都落盘，隐藏
-chain-of-thought 不在 Codex 协议中公开。旧 v0 `grasp_classify` runner 仍保持自身的严格
-隔离策略，见 [`CodexAgentRunner.md`](CodexAgentRunner.md)。
+reasoning summary、agent message、shell/文件/MCP/子 Agent/网络/图像活动、显式
+decision record、tool call、环境响应和 observation 都落盘。Viewer 直接从 App Server
+事件流重建完整可观察活动，不依赖 decision record；隐藏 chain-of-thought 不在 Codex
+协议中公开。旧 v0 `grasp_classify` runner 仍保持自身的严格隔离策略，见
+[`CodexAgentRunner.md`](CodexAgentRunner.md)。
 
 ## 推理 Token 预算
 

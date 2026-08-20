@@ -166,6 +166,10 @@ function formatCount(value) {
   return new Intl.NumberFormat("zh-CN", { notation: number > 99999 ? "compact" : "standard" }).format(number);
 }
 
+function hasFiniteValue(value) {
+  return value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value));
+}
+
 function formatDate(value) {
   if (!value) return "时间未知";
   const date = new Date(value);
@@ -192,6 +196,9 @@ function prettyJson(value) {
 
 function outcomeClass(run) {
   if (run.kind !== "codex") return "capture";
+  if (run.valid_for_scoring === false || ["failed", "invalid"].includes(run.status)) {
+    return "invalid";
+  }
   if (run.outcome?.official_task_success === true) return "success";
   if (run.outcome?.official_task_success === false) return "failure";
   return "pending";
@@ -201,8 +208,13 @@ function outcomeLabel(run) {
   const result = outcomeClass(run);
   if (result === "success") return "task success";
   if (result === "failure") return "task failed";
+  if (result === "invalid") return "invalid run";
   if (result === "capture") return "sensor capture";
   return "in progress";
+}
+
+function stepFailed(step) {
+  return step.success !== true || step.simulator_execution_succeeded === false;
 }
 
 function closeSidebar() {
@@ -231,6 +243,10 @@ function matchesSearch(run) {
     run.profile,
     run.start_condition,
     run.model,
+    run.task,
+    run.icl,
+    run.bbox ? "bbox" : "",
+    run.mask ? "mask" : "",
     `level ${run.level}`,
     outcomeLabel(run),
     run.outcome?.predicted_class,
@@ -278,7 +294,15 @@ function renderRunList() {
       className: `run-item-result ${resultClass}`,
       text: outcomeLabel(run),
     });
-    const count = node("span", { text: `${run.tool_count} actions · ${run.observation_count} obs` });
+    const countParts = [];
+    if (hasFiniteValue(run.step_eef_count)) {
+      countParts.push(`${run.step_eef_count} steps`);
+    }
+    countParts.push(`${run.tool_count} calls`, `${run.observation_count} obs`);
+    if (run.simulator_execution_failure_count) {
+      countParts.push(`${run.simulator_execution_failure_count} sim fails`);
+    }
+    const count = node("span", { text: countParts.join(" · ") });
     button.append(node("div", { className: "run-item-meta" }, [result, count]));
     refs.runList.append(button);
   }
@@ -377,8 +401,8 @@ function renderDetail() {
   renderPrompt(detail.task_prompt, detail.profile, run.kind);
   refs.timelineDescription.textContent =
     run.kind === "codex"
-      ? "每个 Agent 气泡展示它基于哪个 observation、公开了什么判断、为何选择具体参数；紧随其后的 ENV 气泡展示实际反馈与新 observation。"
-      : "这是一条环境采集记录：保留实际命令和传感器变化，但没有 Codex reasoning summary 或结构化 decision record。";
+      ? "每个 Agent 气泡按真实顺序展示动作前公开的 reasoning summary、命令、代码/文件、MCP、子 Agent、网络、图像与消息；紧随其后的 ENV 气泡展示实际反馈和新 observation。"
+      : "这是一条环境采集记录：保留实际命令和传感器变化，但没有 Codex App Server activity stream。";
   renderTimelineControls();
   renderConversation();
 }
@@ -411,6 +435,13 @@ function renderResultStrip(run, outcome) {
       resultChip(run.valid_for_scoring ? "Scoring trace 有效" : "不可计分", run.valid_for_scoring ? "good" : "bad"),
     );
   }
+  if (run.icl) {
+    refs.resultStrip.append(
+      resultChip(`ICL · ${run.icl}`, run.icl === "fixed_demo" ? "good" : "info"),
+    );
+  }
+  if (run.bbox) refs.resultStrip.append(resultChip("BBox · initial only", "info"));
+  if (run.mask) refs.resultStrip.append(resultChip("Mask · initial only", "info"));
   if (outcome.predicted_class) {
     const correct = outcome.classification_correct === true;
     refs.resultStrip.append(
@@ -447,6 +478,15 @@ function renderMetrics(run, runtime) {
     metric("OBSERVATIONS", run.observation_count ?? "—"),
     metric("TOKENS", formatCount(run.total_tokens)),
   );
+  if (hasFiniteValue(run.step_eef_count)) {
+    refs.metricGrid.append(metric("EEF STEPS", run.step_eef_count));
+  }
+  refs.metricGrid.append(
+    metric("SIM EXEC FAILS", run.simulator_execution_failure_count ?? 0),
+  );
+  if (run.tool_failure_count) {
+    refs.metricGrid.append(metric("TOOL FAILS", run.tool_failure_count));
+  }
   if (runtime?.event_audit?.passed !== undefined) {
     refs.metricGrid.append(
       metric("EVENT AUDIT", runtime.event_audit.passed ? "passed" : "failed"),
@@ -527,7 +567,7 @@ function renderTimelineControls() {
   const steps = state.detail.steps;
   for (const [index, step] of steps.entries()) {
     const button = node("button", {
-      className: `step-dot${index === state.selectedStep ? " is-active" : ""}${step.success ? "" : " is-failed"}`,
+      className: `step-dot${index === state.selectedStep ? " is-active" : ""}${stepFailed(step) ? " is-failed" : ""}`,
       text: `A${index + 1}`,
       type: "button",
       title: `${step.tool_label} · ${step.prior_observation_id || "无输入 observation"}`,
@@ -591,8 +631,8 @@ function renderConversation() {
     refs.conversation.append(block);
   }
 
-  if (state.mode === "all" && state.detail.tail_messages.length) {
-    refs.conversation.append(renderTailMessages(state.detail.tail_messages));
+  if (state.mode === "all" && (state.detail.tail_agent_activity || []).length) {
+    refs.conversation.append(renderTailActivity(state.detail.tail_agent_activity));
   }
 }
 
@@ -610,35 +650,7 @@ function bubbleHeader(speaker, title, context) {
 
 function renderAgentRow(step) {
   const body = node("div", { className: "bubble-body" });
-  if (step.messages.length) {
-    const reasoning = node("section", { className: "reasoning-block" });
-    reasoning.append(node("span", { className: "section-label", text: "PUBLIC REASONING SUMMARY" }));
-    for (const message of step.messages) {
-      for (const part of message.parts) {
-        reasoning.append(node("p", { className: "reasoning-part", text: cleanSummary(part) }));
-      }
-    }
-    body.append(reasoning);
-  }
-
-  if (step.decision) body.append(renderDecision(step.decision, step.decision_source));
-  else if (step.unstructured_rationale) {
-    const rationale = node("section", { className: "decision-lead" });
-    rationale.append(node("span", { className: "section-label", text: "UNSTRUCTURED RATIONALE" }));
-    rationale.append(node("p", { text: step.unstructured_rationale }));
-    body.append(rationale);
-  } else if (step.tool !== "start_episode") {
-    const missing = node("section", { className: "decision-lead" });
-    missing.append(node("span", { className: "section-label", text: "DECISION RECORD" }));
-    missing.append(
-      node("p", {
-        text: state.detail.summary.kind === "capture"
-          ? "标准化采集脚本没有 Codex decision stream。"
-          : "本次工具调用没有结构化 decision record。",
-      }),
-    );
-    body.append(missing);
-  }
+  if ((step.agent_activity || []).length) body.append(renderAgentActivity(step.agent_activity));
 
   body.append(renderAction(step));
   const context = `${step.prior_observation_id ? `基于 ${step.prior_observation_id}` : "无 observation"} · +${formatDuration(step.elapsed_seconds)}`;
@@ -653,71 +665,57 @@ function renderAgentRow(step) {
   return node("div", { className: "chat-row agent" }, bubble);
 }
 
-function renderDecision(decision, source) {
-  const fragment = document.createDocumentFragment();
-  const lead = node("section", { className: "decision-lead" });
-  const topline = node("div", { className: "decision-topline" });
-  topline.append(
-    node("span", {
-      className: "section-label",
-      text: source === "host_validated" ? "HOST-VALIDATED DECISION" : "SUBMITTED DECISION",
-    }),
+function activityFailed(event) {
+  const status = String(event.status || "").toLowerCase();
+  const exitCode = event.details?.exitCode;
+  return ["error", "failed", "declined", "cancelled"].some((item) => status.includes(item))
+    || (Number.isFinite(Number(exitCode)) && Number(exitCode) !== 0);
+}
+
+function renderAgentActivity(events, label = "OBSERVABLE AGENT ACTIVITY") {
+  const section = node("section", { className: "agent-activity" });
+  section.append(
+    node("div", { className: "activity-section-heading" }, [
+      node("span", { className: "section-label", text: label }),
+      node("span", { className: "activity-count", text: `${events.length} events` }),
+    ]),
   );
-  if (Number.isFinite(Number(decision.uncertainty))) {
-    const uncertainty = Math.max(0, Math.min(1, Number(decision.uncertainty)));
-    const meter = node("progress", { className: "uncertainty-track" });
-    meter.max = 1;
-    meter.value = uncertainty;
-    topline.append(
-      node("div", { className: "uncertainty" }, [
-        node("span", { text: `不确定度 ${uncertainty.toFixed(2)}` }),
-        meter,
+  const list = node("div", { className: "activity-list" });
+  for (const event of events) {
+    const failed = activityFailed(event);
+    const card = node("article", {
+      className: `activity-card activity-${event.kind || "unknown"}${failed ? " failed" : ""}`,
+    });
+    const metadata = [];
+    if (event.status) metadata.push(event.status);
+    if (hasFiniteValue(event.elapsed_seconds)) metadata.push(`+${formatDuration(event.elapsed_seconds)}`);
+    card.append(
+      node("header", { className: "activity-header" }, [
+        node("span", { className: "activity-kind", text: event.label || event.kind || "Agent activity" }),
+        node("span", { className: "activity-meta", text: metadata.join(" · ") }),
       ]),
     );
-  }
-  lead.append(topline);
-  lead.append(node("p", { text: decision.rationale || "未记录总体理由。" }));
-  fragment.append(lead);
-
-  if (Array.isArray(decision.evidence) && decision.evidence.length) {
-    const evidenceList = node("section", { className: "evidence-list" });
-    for (const evidence of decision.evidence) {
-      evidenceList.append(
-        node("article", { className: "evidence-card" }, [
-          node("span", { className: "evidence-source", text: evidence.source || "evidence" }),
-          node("p", { text: evidence.finding || "" }),
-          node("p", { className: "implication", text: `→ ${evidence.implication || ""}` }),
-        ]),
+    if (event.title) {
+      card.append(node("pre", { className: "activity-title", text: event.title }));
+    }
+    for (const part of event.parts || []) {
+      card.append(
+        node("p", {
+          className: "activity-part",
+          text: event.kind === "reasoning" ? cleanSummary(part) : part,
+        }),
       );
     }
-    fragment.append(evidenceList);
-  }
-
-  const expectation = node("section", { className: "expectation-grid" }, [
-    node("div", {}, [
-      node("span", { className: "section-label", text: "WHY THIS MAGNITUDE" }),
-      node("p", { text: decision.parameter_rationale || "未记录参数理由。" }),
-    ]),
-    node("div", {}, [
-      node("span", { className: "section-label", text: "EXPECTED EFFECT" }),
-      node("p", { text: decision.expected_effect || "未记录预期效果。" }),
-    ]),
-  ]);
-  fragment.append(expectation);
-
-  if (Array.isArray(decision.alternatives_considered) && decision.alternatives_considered.length) {
-    const alternatives = node("details", { className: "alternatives" });
-    alternatives.append(
-      node("summary", { text: `备选方案与排除理由 · ${decision.alternatives_considered.length} 项` }),
-    );
-    const list = node("ul");
-    for (const alternative of decision.alternatives_considered) {
-      list.append(node("li", { text: alternative }));
+    if (event.details && typeof event.details === "object") {
+      const details = node("details", { className: "raw-details activity-details" });
+      details.append(node("summary", { text: "完整公开事件数据" }));
+      details.append(node("pre", { text: prettyJson(event.details) }));
+      card.append(details);
     }
-    alternatives.append(list);
-    fragment.append(alternatives);
+    list.append(card);
   }
-  return fragment;
+  section.append(list);
+  return section;
 }
 
 function actionChips(step) {
@@ -757,9 +755,15 @@ function actionChips(step) {
 
 function renderAction(step) {
   const card = node("section", { className: "action-card" });
+  const failed = stepFailed(step);
+  const statusText = !step.success
+    ? "× tool failed"
+    : step.simulator_execution_succeeded === false
+      ? `✓ host accepted · ⚠ sim execution failed · ${formatDuration(step.duration_seconds)}`
+      : `✓ host accepted · ${formatDuration(step.duration_seconds)}`;
   const status = node("span", {
-    className: `action-status${step.success ? "" : " failed"}`,
-    text: step.success ? `✓ tool accepted · ${formatDuration(step.duration_seconds)}` : "× tool failed",
+    className: `action-status${failed ? " failed" : ""}`,
+    text: statusText,
   });
   card.append(
     node("div", { className: "action-heading" }, [
@@ -811,7 +815,9 @@ function renderEnvironmentRow(step, { inputContext = false } = {}) {
     );
     body.append(unchanged);
   }
-  const status = step.environment_response?.status || (step.success ? "accepted" : "failed");
+  const status = step.simulator_execution_succeeded === false
+    ? `${step.environment_response?.status || "action"} · execution failed`
+    : step.environment_response?.status || (step.success ? "accepted" : "failed");
   const context = `${step.prior_observation_id || "—"} → ${step.next_observation_id || "—"}`;
   const bubble = node("div", { className: "chat-bubble" }, [
     bubbleHeader("ENV", status, context),
@@ -844,8 +850,10 @@ function renderFeedback(step) {
   top.append(content);
   top.append(
     node("span", {
-      className: `feedback-status${step.success ? "" : " failed"}`,
-      text: response.status || (step.success ? "accepted" : "failed"),
+      className: `feedback-status${stepFailed(step) ? " failed" : ""}`,
+      text: executionSucceeded === false
+        ? "execution failed"
+        : response.status || (step.success ? "accepted" : "failed"),
     }),
   );
   block.append(top);
@@ -1047,18 +1055,13 @@ function renderObservation(observation, title) {
   return block;
 }
 
-function renderTailMessages(messages) {
+function renderTailActivity(events) {
   const block = node("article", { className: "round-block tail-message" });
   block.append(node("div", { className: "round-marker", text: "FINAL" }));
   const body = node("div", { className: "bubble-body" });
-  const reasoning = node("section", { className: "reasoning-block" });
-  reasoning.append(node("span", { className: "section-label", text: "PUBLISHED FINAL MESSAGE" }));
-  for (const message of messages) {
-    for (const part of message.parts) reasoning.append(node("p", { className: "reasoning-part", text: cleanSummary(part) }));
-  }
-  body.append(reasoning);
+  body.append(renderAgentActivity(events, "FINAL OBSERVABLE AGENT ACTIVITY"));
   const bubble = node("div", { className: "chat-bubble" }, [
-    bubbleHeader("AGENT", "本轮公开总结", "turn completed"),
+    bubbleHeader("AGENT", "末次机器人调用后的公开活动", "turn completed"),
     body,
   ]);
   block.append(node("div", { className: "chat-row agent" }, bubble));

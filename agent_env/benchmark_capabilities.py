@@ -623,16 +623,21 @@ class BenchmarkCapabilityGateway:
             return output
 
         # The simulator's terminal response doubles as the evaluator record, so it
-        # intentionally contains detailed checker diagnostics.  Those diagnostics
-        # remain available through ``raw_response`` and evaluator-private files but
-        # are not part of the Agent contract: only the official terminal success bit
-        # is public.
+        # intentionally contains detailed checker diagnostics and the commitment
+        # opening.  Those fields remain available through ``raw_response`` and
+        # evaluator-private files but are not part of the Agent contract: only the
+        # official terminal success bit is public.
         public_source = response
         if response.get("status") == "rollout_finished":
+            evaluator_private_fields = {
+                "evaluator_checks",
+                "salt_reveal",
+                "seed_reveal",
+            }
             public_source = {
                 key: value
                 for key, value in response.items()
-                if key != "evaluator_checks"
+                if key not in evaluator_private_fields
             }
         return visit(public_source), images
 

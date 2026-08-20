@@ -55,6 +55,7 @@ textures.zip
 **/tmp.png
 
 /agent_runs/
+/agent_runs_legacy/
 /ghp
 /hf_token
 /.semantic_models

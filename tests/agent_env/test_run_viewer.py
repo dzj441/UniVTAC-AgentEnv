@@ -29,6 +29,20 @@ def _write_jsonl(path: Path, values: list[object], *, partial_tail: bool = False
     path.write_text(body, encoding="utf-8")
 
 
+def _read_jsonl_for_test(path: Path) -> list[dict]:
+    output: list[dict] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            output.append(value)
+    return output
+
+
 def _observation(run: Path, observation_id: str, gripper: float, x: float) -> dict:
     image = run / "observations" / observation_id / "head_rgb.png"
     image.parent.mkdir(parents=True, exist_ok=True)
@@ -66,6 +80,8 @@ def _make_codex_run(root: Path) -> Path:
             "level": 1,
             "model": "test-model",
             "effort": "high",
+            "icl": {"name": "fixed_demo"},
+            "annotations": {"bbox": True, "mask": False},
             "profile": {
                 "level": 1,
                 "name": "vision_only_control",
@@ -102,6 +118,7 @@ def _make_codex_run(root: Path) -> Path:
             "expected_target": "orange",
             "committed_pad_correct": True,
             "official_task_success": True,
+            "step_eef_count": 1,
         },
     )
     decision = {
@@ -149,7 +166,7 @@ def _make_codex_run(root: Path) -> Path:
                 },
                 "simulator_response": {
                     "status": "probe_complete",
-                    "feedback": {"execution_succeeded": True},
+                    "feedback": {"execution_succeeded": False},
                     "observation": second,
                 },
                 "prior_observation_id": "obs_000",
@@ -168,6 +185,111 @@ def _make_codex_run(root: Path) -> Path:
             {"kind": "published_reasoning_summary", "summary": ["start"], "elapsed_seconds": 5},
             {"kind": "published_reasoning_summary", "summary": ["probe plan"], "elapsed_seconds": 15},
             {"kind": "agent_message", "text": "done", "elapsed_seconds": 25},
+        ],
+    )
+    _write_jsonl(
+        run / "codex_app_server_events.jsonl",
+        [
+            {
+                "sequence": 0,
+                "direction": "server_to_host",
+                "elapsed_seconds": 5,
+                "message": {
+                    "method": "item/completed",
+                    "params": {
+                        "item": {
+                            "type": "reasoning",
+                            "id": "reasoning-start",
+                            "summary": ["start"],
+                            "content": ["hidden content must not enter the viewer"],
+                        }
+                    },
+                },
+            },
+            {
+                "sequence": 1,
+                "direction": "server_to_host",
+                "elapsed_seconds": 15,
+                "message": {
+                    "method": "item/completed",
+                    "params": {
+                        "item": {
+                            "type": "reasoning",
+                            "id": "reasoning-probe",
+                            "summary": ["probe plan"],
+                            "content": [],
+                        }
+                    },
+                },
+            },
+            {
+                "sequence": 2,
+                "direction": "server_to_host",
+                "elapsed_seconds": 16,
+                "message": {
+                    "method": "item/completed",
+                    "params": {
+                        "item": {
+                            "type": "commandExecution",
+                            "id": "shell-inspect",
+                            "command": "python inspect_demo.py",
+                            "cwd": "/tmp/eval/workspace",
+                            "status": "completed",
+                            "aggregatedOutput": "waypoint_count=28\n",
+                            "exitCode": 0,
+                            "durationMs": 25,
+                        }
+                    },
+                },
+            },
+            {
+                "sequence": 3,
+                "direction": "server_to_host",
+                "elapsed_seconds": 17,
+                "message": {
+                    "method": "item/completed",
+                    "params": {
+                        "item": {
+                            "type": "imageView",
+                            "id": "view-contact-sheet",
+                            "path": "benchmark_inputs/expert_demo/overview/head_rgb.png",
+                        }
+                    },
+                },
+            },
+            {
+                "sequence": 4,
+                "direction": "server_to_host",
+                "elapsed_seconds": 18,
+                "message": {
+                    "method": "item/completed",
+                    "params": {
+                        "item": {
+                            "type": "collabToolCall",
+                            "id": "sub-agent-review",
+                            "tool": "spawn_agent",
+                            "status": "completed",
+                            "newThreadId": "thread-review",
+                        }
+                    },
+                },
+            },
+            {
+                "sequence": 5,
+                "direction": "server_to_host",
+                "elapsed_seconds": 25,
+                "message": {
+                    "method": "item/completed",
+                    "params": {
+                        "item": {
+                            "type": "agentMessage",
+                            "id": "final-message",
+                            "text": "done",
+                            "phase": "final_answer",
+                        }
+                    },
+                },
+            },
         ],
     )
     (run / "codex_operator_prompt.txt").write_text("test prompt", encoding="utf-8")
@@ -330,18 +452,39 @@ def test_repository_discovers_codex_and_capture_runs(tmp_path: Path) -> None:
     assert codex["tool_count"] == 2
     assert codex["observation_count"] == 2
     assert codex["total_tokens"] == 123
+    assert codex["step_eef_count"] == 1
+    assert codex["simulator_execution_failure_count"] == 1
+    assert codex["tool_failure_count"] == 0
+    assert codex["icl"] == "fixed_demo"
+    assert codex["bbox"] is True
+    assert codex["mask"] is False
 
 
-def test_codex_detail_joins_reasoning_decision_action_and_observation(tmp_path: Path) -> None:
+def test_codex_detail_joins_observable_activity_action_and_observation(tmp_path: Path) -> None:
     root = tmp_path / "agent_runs"
     _make_codex_run(root)
     detail = RunRepository(root).detail("round/level1")
     assert len(detail["steps"]) == 2
     assert detail["steps"][0]["messages"][0]["parts"] == ["start"]
+    assert detail["steps"][0]["agent_activity"][0]["kind"] == "reasoning"
+    assert detail["steps"][0]["agent_activity"][0]["parts"] == ["start"]
+    assert "hidden content" not in json.dumps(
+        detail["steps"][0]["agent_activity"], ensure_ascii=False
+    )
     probe = detail["steps"][1]
     assert probe["messages"][0]["parts"] == ["probe plan"]
-    assert probe["decision_source"] == "host_validated"
-    assert probe["decision"]["parameter_rationale"] == "1 mm is conservative"
+    assert probe["success"] is True
+    assert probe["simulator_execution_succeeded"] is False
+    assert [event["kind"] for event in probe["agent_activity"]] == [
+        "reasoning",
+        "command_execution",
+        "image_view",
+        "collab_tool_call",
+    ]
+    assert probe["agent_activity"][1]["title"] == "python inspect_demo.py"
+    assert probe["agent_activity"][1]["details"]["aggregatedOutput"] == (
+        "waypoint_count=28\n"
+    )
     assert probe["arguments"] == {"observation_id": "obs_000", "delta_gripper": -0.001}
     assert probe["output_observation"]["modalities"]["head_rgb"]["artifact"].endswith(
         "obs_001/head_rgb.png"
@@ -349,6 +492,60 @@ def test_codex_detail_joins_reasoning_decision_action_and_observation(tmp_path: 
     assert probe["state_delta"]["gripper_delta_mm"] == pytest.approx(-1.0)
     assert probe["state_delta"]["end_effector_translation_m"] == pytest.approx(0.01)
     assert detail["tail_messages"][0]["parts"] == ["done"]
+    assert detail["tail_agent_activity"][0]["kind"] == "agent_message"
+    assert detail["tail_agent_activity"][0]["parts"] == ["done"]
+    assert probe["agent_activity"][3]["label"] == "Collaboration tool call"
+    assert detail["agent_activity_count"] == 6
+
+
+def test_app_server_activity_does_not_depend_on_decision_records(tmp_path: Path) -> None:
+    root = tmp_path / "agent_runs"
+    run = _make_codex_run(root)
+    (run / "codex_decisions.jsonl").unlink()
+    calls = []
+    for record in _read_jsonl_for_test(run / "codex_tool_calls.jsonl"):
+        arguments = record.get("arguments")
+        if isinstance(arguments, dict):
+            record["arguments"] = {
+                key: value for key, value in arguments.items() if key != "decision_record"
+            }
+        calls.append(record)
+    _write_jsonl(run / "codex_tool_calls.jsonl", calls)
+
+    detail = RunRepository(root).detail("round/level1")
+    probe = detail["steps"][1]
+    assert "decision" not in probe
+    assert [event["kind"] for event in probe["agent_activity"]] == [
+        "reasoning",
+        "command_execution",
+        "image_view",
+        "collab_tool_call",
+    ]
+    assert probe["arguments"] == {"observation_id": "obs_000", "delta_gripper": -0.001}
+
+
+def test_repository_keeps_prelaunch_codex_failure_visible(tmp_path: Path) -> None:
+    root = tmp_path / "agent_runs"
+    run = root / "batch" / "invalid_attempt"
+    _write_json(
+        run / "codex_run_outcome.json",
+        {
+            "status": "failed",
+            "valid_for_scoring": False,
+            "task": "pull_out_key",
+            "profile_index": 6,
+        },
+    )
+
+    repository = RunRepository(root)
+    summaries = repository.list_runs()
+    assert len(summaries) == 1
+    assert summaries[0]["id"] == "batch/invalid_attempt"
+    assert summaries[0]["kind"] == "codex"
+    assert summaries[0]["status"] == "failed"
+    assert summaries[0]["valid_for_scoring"] is False
+    assert summaries[0]["tool_count"] == 0
+    assert repository.detail("batch/invalid_attempt")["steps"] == []
 
 
 def test_protocol_status_shell_does_not_overwrite_complete_observation(
@@ -414,7 +611,7 @@ def test_capture_detail_keeps_commands_but_does_not_invent_reasoning(tmp_path: P
     assert detail["summary"]["kind"] == "capture"
     assert len(detail["steps"]) == 1
     assert detail["steps"][0]["tool"] == "start_episode"
-    assert detail["steps"][0]["decision"] is None
+    assert "decision" not in detail["steps"][0]
     assert detail["steps"][0]["output_observation"]["observation_id"] == "obs_000"
     assert "没有 Codex" in detail["recording_note"]
 

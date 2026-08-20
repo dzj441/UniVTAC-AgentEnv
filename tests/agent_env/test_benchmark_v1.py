@@ -390,6 +390,8 @@ def test_gateway_keeps_terminal_checker_details_private(tmp_path: Path) -> None:
             {
                 "status": "rollout_finished",
                 "official_task_success": True,
+                "seed_reveal": 123456789,
+                "salt_reveal": "private-commitment-opening",
                 "evaluator_checks": {
                     "base_task_success": True,
                     "settle_steps": 60,
@@ -421,9 +423,16 @@ def test_gateway_keeps_terminal_checker_details_private(tmp_path: Path) -> None:
     )
 
     assert finished.raw_response["evaluator_checks"]["settle_steps"] == 60
+    assert finished.raw_response["seed_reveal"] == 123456789
+    assert finished.raw_response["salt_reveal"] == "private-commitment-opening"
     assert finished.public_response["official_task_success"] is True
     assert "evaluator_checks" not in finished.public_response
-    assert "private_threshold_m" not in str(finished.content_items)
+    assert "seed_reveal" not in finished.public_response
+    assert "salt_reveal" not in finished.public_response
+    public_content = str(finished.content_items)
+    assert "private_threshold_m" not in public_content
+    assert "123456789" not in public_content
+    assert "private-commitment-opening" not in public_content
 
 
 def test_gateway_publishes_only_current_metric_depth_and_raw_masks(
