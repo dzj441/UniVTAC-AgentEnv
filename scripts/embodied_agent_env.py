@@ -59,6 +59,7 @@ from agent_env.benchmark_profiles import (
 from agent_env.benchmark_protocol import BenchmarkEpisodeProtocol
 from agent_env.benchmark_tasks import (
     BenchmarkTaskSpec,
+    benchmark_task_parameters,
     get_benchmark_task,
     list_benchmark_tasks,
 )
@@ -91,6 +92,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--provide-bbox", action="store_true")
     parser.add_argument("--provide-mask", action="store_true")
     parser.add_argument(
+        "--key-initial-relative-yaw-rad",
+        type=float,
+        default=None,
+        help=(
+            "Optional fixed pull_out_key yaw relative to its slot in radians; "
+            "the default restores the legacy random range [-pi/2, -pi/4]."
+        ),
+    )
+    parser.add_argument(
         "--pre-move",
         action="store_true",
         help=(
@@ -111,6 +121,10 @@ def parse_args() -> argparse.Namespace:
 
 ARGS = parse_args()
 TASK_SPEC = get_benchmark_task(ARGS.task)
+TASK_PARAMETERS = benchmark_task_parameters(
+    TASK_SPEC.name,
+    key_initial_relative_yaw_rad=ARGS.key_initial_relative_yaw_rad,
+)
 PROFILE = get_observation_profile(ARGS.profile)
 ANNOTATIONS = AnnotationCapabilities(
     provide_bbox=bool(ARGS.provide_bbox),
@@ -248,6 +262,7 @@ class EmbodiedAgentEnv:
             {
                 "created_utc": utc_now(),
                 "task": self.task_spec.to_manifest(pre_move=PRE_MOVE_ENABLED),
+                "task_parameters": TASK_PARAMETERS,
                 "start_condition": START_CONDITION,
                 "pre_move_enabled": PRE_MOVE_ENABLED,
                 "observation_profile": self.profile.to_manifest(),
@@ -512,6 +527,7 @@ class EmbodiedAgentEnv:
             delta_position=command.get("delta_position"),
             delta_rpy=command.get("delta_rpy"),
             delta_gripper=command.get("delta_gripper"),
+            current_gripper_qpos=self.task._robot_manager.get_gripper_qpos(),
         )
         prior_observation_id = self.protocol.current_observation_id
         action = np.concatenate((dp, dr, [dg])).astype(np.float32)
@@ -548,7 +564,7 @@ class EmbodiedAgentEnv:
             "status": "action_complete",
             "prior_observation_id": prior_observation_id,
             "action": {
-                "primitive": "bounded_step_eef",
+                "primitive": "step_eef_delta",
                 "delta_position_world_m": dp.tolist(),
                 "delta_rpy_world_rad": dr.tolist(),
                 "delta_gripper_m": dg,
@@ -686,6 +702,8 @@ def make_run_dir() -> Path:
 
 def make_task(run_dir: Path) -> AgentEnvTask:
     cfg = TASK_CFG_CLASS()
+    if TASK_SPEC.name == "pull_out_key":
+        cfg.key_initial_relative_yaw_rad = ARGS.key_initial_relative_yaw_rad
     cfg.save_dir = run_dir / "simulator_internal"
     cfg.scene.num_envs = 1
     cfg.reset_time_limit = RESET_TIME_LIMIT_SECONDS
@@ -735,6 +753,7 @@ def main() -> None:
         {
             "run_dir": str(run_dir.resolve()),
             "task": TASK_SPEC.name,
+            "task_parameters": TASK_PARAMETERS,
             "start_condition": START_CONDITION,
             "pre_move_enabled": PRE_MOVE_ENABLED,
             "observation_profile": PROFILE.name,
@@ -747,6 +766,7 @@ def main() -> None:
         {
             "status": "ready",
             "task": TASK_SPEC.name,
+            "task_parameters": TASK_PARAMETERS,
             "start_condition": START_CONDITION,
             "pre_move_enabled": PRE_MOVE_ENABLED,
             "observation_profile": PROFILE.to_manifest(),

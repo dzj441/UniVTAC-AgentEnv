@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .benchmark_protocol import BenchmarkEpisodeProtocol
+
 
 @dataclass(frozen=True)
 class CommandFields:
@@ -100,7 +102,12 @@ def public_benchmark_command_schema() -> dict[str, Any]:
                 },
                 "delta_gripper": {
                     **number,
-                    "description": "Per-finger gripper-qpos delta in metres.",
+                    "minimum": -BenchmarkEpisodeProtocol.GRIPPER_MAX_QPOS_M,
+                    "maximum": BenchmarkEpisodeProtocol.GRIPPER_MAX_QPOS_M,
+                    "description": (
+                        "Per-finger gripper-qpos delta in metres; the resulting target "
+                        "must remain within [0, 0.039]."
+                    ),
                 },
             },
         },

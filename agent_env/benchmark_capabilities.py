@@ -15,6 +15,7 @@ from typing import Any, Callable, Mapping
 
 from .artifacts import file_sha256
 from .benchmark_profiles import AnnotationCapabilities, ObservationProfile
+from .benchmark_protocol import BenchmarkEpisodeProtocol
 from .benchmark_tasks import BenchmarkTaskSpec
 from .capabilities import (
     CapabilityViolation,
@@ -72,26 +73,31 @@ def build_benchmark_tool_registry(
         EmbodiedToolSpec(
             name="step_eef",
             description=(
-                "Apply one bounded world-frame end-effector XYZ/RPY and gripper delta, "
-                "then return a fresh observation. Zero deltas are allowed to let physics "
-                "settle. At most 50 accepted steps are available."
+                "Apply one finite world-frame end-effector XYZ/RPY and gripper delta, "
+                "then return a fresh observation. XYZ/RPY deltas have no benchmark "
+                "magnitude limit. The resulting per-finger gripper qpos must remain "
+                "within its physical range [0, 0.039] metres. Zero deltas are allowed "
+                "to let physics settle. At most 50 accepted steps are available."
             ),
             input_schema=_object_schema(
                 {
                     "observation_id": observation_id,
                     "delta_position": {
                         **vector3,
-                        "description": "World XYZ metres; each <=0.04, norm <=0.06.",
+                        "description": "Finite world-frame XYZ delta in metres.",
                     },
                     "delta_rpy": {
                         **vector3,
-                        "description": "World RPY radians; each absolute value <=0.35.",
+                        "description": "Finite world-frame RPY delta in radians.",
                     },
                     "delta_gripper": {
                         "type": "number",
-                        "minimum": -0.005,
-                        "maximum": 0.005,
-                        "description": "Per-finger qpos delta in metres; abs <=0.005.",
+                        "minimum": -BenchmarkEpisodeProtocol.GRIPPER_MAX_QPOS_M,
+                        "maximum": BenchmarkEpisodeProtocol.GRIPPER_MAX_QPOS_M,
+                        "description": (
+                            "Per-finger qpos delta in metres. The resulting target qpos "
+                            "must remain in the physical range [0, 0.039]."
+                        ),
                     },
                 },
                 (
@@ -188,6 +194,7 @@ class BenchmarkCapabilityGateway:
         )
         self.stage = "ready"
         self.latest_observation_id: str | None = None
+        self._latest_gripper_qpos_m: float | None = None
         self.terminal = False
         self._consecutive_rejected_calls = 0
         self._lock = threading.Lock()
@@ -287,14 +294,23 @@ class BenchmarkCapabilityGateway:
             position = self._vector3(arguments["delta_position"], "delta_position")
             rotation = self._vector3(arguments["delta_rpy"], "delta_rpy")
             gripper = self._finite(arguments["delta_gripper"], "delta_gripper")
-            if max(map(abs, position)) > 0.04 or math.sqrt(
-                sum(value * value for value in position)
-            ) > 0.06:
-                raise ToolInputError("delta_position exceeds the public action bound")
-            if max(map(abs, rotation)) > 0.35:
-                raise ToolInputError("delta_rpy exceeds the public action bound")
-            if abs(gripper) > 0.005:
-                raise ToolInputError("delta_gripper exceeds the public action bound")
+            if abs(gripper) > BenchmarkEpisodeProtocol.GRIPPER_MAX_QPOS_M:
+                raise ToolInputError("delta_gripper exceeds the physical opening range")
+            if gripper != 0.0:
+                if self._latest_gripper_qpos_m is None:
+                    raise ToolInputError(
+                        "latest gripper qpos is unavailable for target validation"
+                    )
+                target_qpos = self._latest_gripper_qpos_m + gripper
+                tolerance = 1e-6
+                if not (
+                    BenchmarkEpisodeProtocol.GRIPPER_MIN_QPOS_M - tolerance
+                    <= target_qpos
+                    <= BenchmarkEpisodeProtocol.GRIPPER_MAX_QPOS_M + tolerance
+                ):
+                    raise ToolInputError(
+                        "delta_gripper would exceed the physical target qpos range"
+                    )
             command.update(
                 {
                     "delta_position": position,
@@ -513,6 +529,13 @@ class BenchmarkCapabilityGateway:
         observation = response.get("observation")
         if isinstance(observation, dict) and isinstance(observation.get("observation_id"), str):
             self.latest_observation_id = observation["observation_id"]
+            robot_state = observation.get("robot_state")
+            if isinstance(robot_state, dict):
+                joint_position = robot_state.get("joint_position_9d")
+                if isinstance(joint_position, list) and len(joint_position) == 9:
+                    qpos = joint_position[-2]
+                    if isinstance(qpos, (int, float)) and math.isfinite(float(qpos)):
+                        self._latest_gripper_qpos_m = float(qpos)
         status = response.get("status")
         if status == "rollout_started":
             self.stage = "active"

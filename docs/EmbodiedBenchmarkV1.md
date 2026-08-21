@@ -82,7 +82,7 @@ Isaac 的 raw instance ID、label、actor 名和 USD prim path 只在 host 内�
 
 | Task | 指令 | 初始状态 | 终局策略 |
 |---|---|---|---|
-| `pull_out_key` | Grasp the key and pull it completely out of the slot. | 默认机器人 home pose，key 未抓取 | 使用原任务 checker；拔出阈值仍需后续视频校准 |
+| `pull_out_key` | Grasp the key and pull it completely out of the slot. | 默认机器人 home pose，key 未抓取；key 相对 slot 的初始 yaw 恢复原始 `Uniform(-π/2, -π/4)` 分布 | 使用原任务 checker；拔出阈值仍需后续视频校准 |
 | `put_bottle_in_shelf` | Pick up the bottle from the table, place it upright inside the shelf, and release it. | 默认机器人 home pose，bottle 未抓取 | 原位置/姿态 checker + 已松爪 + 60 physics steps 后稳定 |
 
 v1 默认关闭 task-specific `pre_move()`，因此 Agent 必须自行定位、接近并抓取物体。为复现
@@ -90,6 +90,10 @@ v1 默认关闭 task-specific `pre_move()`，因此 Agent 必须自行定位、�
 `pre_move()`，并在 manifest 中记为 `start_condition=pregrasped`。默认模式记为
 `start_condition=ungrasped`。跳过 `pre_move()` 时只建立旧 checker 必需的 host-private
 参考状态，不移动机器人或物体。
+
+Key 的相对初始 yaw 可通过 `--key-initial-relative-yaw-rad RADIANS` 固定；例如诊断用的
+垂直条件传入 `-1.5707963267948966`。省略该参数时始终使用上述原始随机分布，所选模式与
+固定值或随机范围会写入 evaluator manifest，但不会加入 Agent task prompt。
 
 Bottle 的 release 阈值为 gripper qpos `>= 0.0175 m`；稳定要求 60 steps 前后物体平移
 不超过 `0.01 m`、旋转不超过 `10°`。三项必须同时成立。
@@ -112,17 +116,16 @@ Bottle 的 release 阈值为 gripper qpos `>= 0.0175 m`；稳定要求 60 steps 
 
 | 参数 | 边界 |
 |---|---|
-| 每轴平移 | `abs <= 0.04 m` |
-| 平移向量范数 | `<= 0.06 m` |
-| 每轴 RPY | `abs <= 0.35 rad` |
-| Gripper delta | `abs <= 0.005 m` |
+| XYZ delta | Benchmark 不设幅度上限；必须是三个有限数值，下层规划器仍可因不可达或碰撞而拒绝目标 |
+| RPY delta | Benchmark 不设幅度上限；必须是三个有限数值，下层规划器仍可拒绝无效目标 |
+| Gripper delta | 每指 qpos 的目标值必须保持在物理范围 `[0, 0.039] m`；不做静默钳制 |
 | Accepted `step_eef` 数量 | 最多 50 |
 
 `step_eef` 按实际非零分量路由：仅 EEF 改变时使用 `move`，仅 gripper 改变时使用
 `gripper`，两者都改变时才使用 `all`。全零动作合法，并以不调用 arm/gripper planner 的
 固定 20 physics steps wait 等待物理稳定。这样纯夹爪和 wait 不会因为无关的 cuRobo arm
 planning failure 而被拒绝。每个 step 必须引用最新 `observation_id`；陈旧 ID、
-未知字段、非有限数和越界动作在改变世界之前被拒绝。接口不返回目标方向、目标半空间、
+未知字段、非有限数和超出物理开合范围的 gripper 目标在改变世界之前被拒绝。接口不返回目标方向、目标半空间、
 语义动作提示、actor pose、IK/joint target 或过程 task success。
 
 每个 arm planning 结果的原始 cuRobo status、query validity、attempt 数、timing 和终端误差
@@ -279,6 +282,23 @@ task-success 终局可见性放在 base instruction/tool description 中。当�
 instruction 仅说明三工具生命周期、每次机器人调用后等待其结果 observation，再进行下一次
 机器人调用，以及 success 只由 `finish_episode` 返回；不再发送额外的 UniVTAC developer
 instruction。
+TODO（待后续 A/B 决定）：评估是否把 ICL 目录提示补充为“该示范来自同一任务的另一个
+episode，当前 episode 的初始场景状态可能不同”。候选提示不继续追加如何使用示范或
+“因此不能精确复刻”等结论，让 Agent 自行判断是否以及如何适配。
+同时为 ICL manifest 设计显式但非策略性的关系元数据，例如：
+
+```json
+{
+  "target_task": "pull_out_key",
+  "target_variant": "perpendicular",
+  "demo_source_task": "pull_out_key",
+  "demo_source_variant": "standard",
+  "demo_relation": "same_task_different_variant"
+}
+```
+
+该 manifest 关系 schema 目前只作为 TODO，不在本轮实现；后续实现时只声明资产关系，
+不向 Agent 提供适配方法。
 prompt 不再要求 Agent
 “只能使用本 run 信息”，也不要求结构化 rationale。Reference runner 默认使用
 `action_per_turn`；`single_turn` 仅保留为显式兼容/诊断选项。

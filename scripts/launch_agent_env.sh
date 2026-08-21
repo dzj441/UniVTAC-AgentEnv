@@ -24,7 +24,7 @@ for argument in "$@"; do
 done
 if [[ "${HAS_TASK}" == true || "${HAS_PROFILE}" == true ]]; then
   if [[ "${HAS_TASK}" != true || "${HAS_PROFILE}" != true || "${HAS_LEVEL}" == true ]]; then
-    echo "generic usage: $0 --task TASK --profile {1..6} [--pre-move] [--provide-bbox] [--provide-mask] [--device cuda:0] [--run-dir PATH]" >&2
+    echo "generic usage: $0 --task TASK --profile {1..6} [--pre-move] [--provide-bbox] [--provide-mask] [--key-initial-relative-yaw-rad RAD] [--device cuda:0] [--run-dir PATH]" >&2
     exit 2
   fi
   AGENT_ENV_RUNNER="scripts/embodied_agent_env.py"
@@ -32,7 +32,7 @@ elif [[ "${HAS_LEVEL}" == true ]]; then
   AGENT_ENV_RUNNER="scripts/grasp_classify_agent_env.py"
 else
   echo "legacy usage: $0 --level {1|2|3} [--device cuda:0] [--run-dir PATH]" >&2
-  echo "generic usage: $0 --task TASK --profile {1..6} [--pre-move] [--provide-bbox] [--provide-mask] [--device cuda:0] [--run-dir PATH]" >&2
+  echo "generic usage: $0 --task TASK --profile {1..6} [--pre-move] [--provide-bbox] [--provide-mask] [--key-initial-relative-yaw-rad RAD] [--device cuda:0] [--run-dir PATH]" >&2
   exit 2
 fi
 

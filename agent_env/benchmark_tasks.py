@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
+
+
+LEGACY_KEY_INITIAL_RELATIVE_YAW_RANGE_RAD = (-math.pi / 2, -math.pi / 4)
 
 
 @dataclass(frozen=True)
@@ -87,3 +91,35 @@ def get_benchmark_task(value: str) -> BenchmarkTaskSpec:
 
 def list_benchmark_tasks() -> tuple[BenchmarkTaskSpec, ...]:
     return tuple(_TASKS[name] for name in sorted(_TASKS))
+
+
+def benchmark_task_parameters(
+    task_name: str,
+    *,
+    key_initial_relative_yaw_rad: float | None = None,
+) -> dict[str, Any]:
+    """Validate and describe evaluator-selected task reset parameters."""
+
+    get_benchmark_task(task_name)
+    if key_initial_relative_yaw_rad is not None and task_name != "pull_out_key":
+        raise ValueError(
+            "--key-initial-relative-yaw-rad is valid only for pull_out_key"
+        )
+    if task_name != "pull_out_key":
+        return {}
+    if key_initial_relative_yaw_rad is None:
+        return {
+            "key_initial_relative_yaw": {
+                "mode": "legacy_random",
+                "range_rad": list(LEGACY_KEY_INITIAL_RELATIVE_YAW_RANGE_RAD),
+            }
+        }
+    value = float(key_initial_relative_yaw_rad)
+    if not math.isfinite(value):
+        raise ValueError("key initial relative yaw must be finite")
+    return {
+        "key_initial_relative_yaw": {
+            "mode": "fixed",
+            "value_rad": value,
+        }
+    }

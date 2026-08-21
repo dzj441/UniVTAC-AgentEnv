@@ -1,4 +1,4 @@
-"""Task-agnostic lifecycle and bounded EEF action protocol."""
+"""Task-agnostic lifecycle and EEF action protocol."""
 
 from __future__ import annotations
 
@@ -19,10 +19,8 @@ class BenchmarkEpisodeProtocol:
     profile: ObservationProfile
 
     MAX_STEPS = 50
-    MAX_TRANSLATION_COMPONENT_M = 0.04
-    MAX_TRANSLATION_NORM_M = 0.06
-    MAX_ROTATION_COMPONENT_RAD = 0.35
-    MAX_GRIPPER_DELTA_M = 0.005
+    GRIPPER_MIN_QPOS_M = 0.0
+    GRIPPER_MAX_QPOS_M = 0.039
 
     def __post_init__(self) -> None:
         self.started = False
@@ -54,6 +52,7 @@ class BenchmarkEpisodeProtocol:
         delta_position: object,
         delta_rpy: object,
         delta_gripper: object,
+        current_gripper_qpos: object | None = None,
     ) -> tuple[np.ndarray, np.ndarray, float]:
         self._validate_active_observation(observation_id)
         if self.step_count >= self.MAX_STEPS:
@@ -66,14 +65,31 @@ class BenchmarkEpisodeProtocol:
             raise BenchmarkProtocolError("delta_gripper must be a finite number") from exc
         if not np.isfinite(dg):
             raise BenchmarkProtocolError("delta_gripper must be a finite number")
-        if np.max(np.abs(dp)) > self.MAX_TRANSLATION_COMPONENT_M:
-            raise BenchmarkProtocolError("Translation exceeds the per-component bound")
-        if np.linalg.norm(dp) > self.MAX_TRANSLATION_NORM_M:
-            raise BenchmarkProtocolError("Translation exceeds the per-step norm bound")
-        if np.max(np.abs(dr)) > self.MAX_ROTATION_COMPONENT_RAD:
-            raise BenchmarkProtocolError("Rotation exceeds the per-component bound")
-        if abs(dg) > self.MAX_GRIPPER_DELTA_M:
-            raise BenchmarkProtocolError("Gripper delta exceeds the per-step bound")
+        if abs(dg) > self.GRIPPER_MAX_QPOS_M - self.GRIPPER_MIN_QPOS_M:
+            raise BenchmarkProtocolError(
+                "Gripper delta exceeds the full physical opening range"
+            )
+        if dg != 0.0:
+            try:
+                current_qpos = float(current_gripper_qpos)
+            except (TypeError, ValueError) as exc:
+                raise BenchmarkProtocolError(
+                    "current_gripper_qpos must be available for a gripper action"
+                ) from exc
+            if not np.isfinite(current_qpos):
+                raise BenchmarkProtocolError(
+                    "current_gripper_qpos must be available for a gripper action"
+                )
+            target_qpos = current_qpos + dg
+            tolerance = 1e-6
+            if not (
+                self.GRIPPER_MIN_QPOS_M - tolerance
+                <= target_qpos
+                <= self.GRIPPER_MAX_QPOS_M + tolerance
+            ):
+                raise BenchmarkProtocolError(
+                    "Gripper target exceeds the physical per-finger qpos range"
+                )
         return dp, dr, dg
 
     def complete_step(self, observation_id: str) -> None:
@@ -110,10 +126,13 @@ class BenchmarkEpisodeProtocol:
                 "translation_frame": "world",
                 "rotation_frame": "world",
                 "rotation_parameterization": "roll_pitch_yaw_delta_radians",
-                "max_abs_translation_component_m": self.MAX_TRANSLATION_COMPONENT_M,
-                "max_translation_norm_m": self.MAX_TRANSLATION_NORM_M,
-                "max_abs_rotation_component_rad": self.MAX_ROTATION_COMPONENT_RAD,
-                "max_abs_gripper_delta_m": self.MAX_GRIPPER_DELTA_M,
+                "translation_benchmark_limit": None,
+                "rotation_benchmark_limit": None,
+                "gripper_parameterization": "per_finger_qpos_delta_m",
+                "gripper_target_qpos_range_m": [
+                    self.GRIPPER_MIN_QPOS_M,
+                    self.GRIPPER_MAX_QPOS_M,
+                ],
                 "zero_delta_allowed": True,
                 "zero_delta_behavior": "wait_20_physics_steps_without_planning",
                 "control_routing": {

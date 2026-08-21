@@ -127,6 +127,17 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return records
 
 
+def _read_optional_text(path: Path) -> str | None:
+    """Read one runner-authored text artifact without breaking legacy runs."""
+
+    if not path.is_file():
+        return None
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
 def _as_float(value: Any, default: float = 0.0) -> float:
     try:
         result = float(value)
@@ -1153,8 +1164,15 @@ class RunRepository:
             )
             tail_messages = []
             tail_agent_activity = []
-        prompt_path = run.directory / "codex_operator_prompt.txt"
-        prompt = prompt_path.read_text(encoding="utf-8") if prompt_path.is_file() else None
+        base_instructions = _read_optional_text(
+            run.directory / "codex_base_instructions.txt"
+        )
+        developer_instructions = _read_optional_text(
+            run.directory / "codex_developer_instructions.txt"
+        )
+        operator_prompt = _read_optional_text(
+            run.directory / "codex_operator_prompt.txt"
+        )
         profile = _profile_from(codex_manifest, env_manifest)
         runtime = codex_outcome.get("codex_runtime")
         runtime = runtime if isinstance(runtime, dict) else {}
@@ -1178,7 +1196,34 @@ class RunRepository:
         return {
             "summary": summary,
             "profile": profile,
-            "task_prompt": prompt,
+            # Keep task_prompt for older viewer clients while exposing every
+            # runner-authored instruction layer to current clients.
+            "task_prompt": operator_prompt,
+            "prompt_context": {
+                "scope": "benchmark_supplied",
+                "note": (
+                    "These are the instruction layers explicitly supplied by the "
+                    "UniVTAC runner. Codex service-internal system instructions are "
+                    "not exported by the App Server and are not represented here."
+                ),
+                "sections": [
+                    {
+                        "role": "base",
+                        "label": "Base instructions",
+                        "text": base_instructions,
+                    },
+                    {
+                        "role": "developer",
+                        "label": "Developer instructions",
+                        "text": developer_instructions,
+                    },
+                    {
+                        "role": "operator",
+                        "label": "Operator / task prompt",
+                        "text": operator_prompt,
+                    },
+                ],
+            },
             "steps": steps,
             "tail_messages": tail_messages,
             "tail_agent_activity": tail_agent_activity,

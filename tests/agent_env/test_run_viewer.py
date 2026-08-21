@@ -292,6 +292,12 @@ def _make_codex_run(root: Path) -> Path:
             },
         ],
     )
+    (run / "codex_base_instructions.txt").write_text(
+        "base instructions", encoding="utf-8"
+    )
+    (run / "codex_developer_instructions.txt").write_text(
+        "developer instructions", encoding="utf-8"
+    )
     (run / "codex_operator_prompt.txt").write_text("test prompt", encoding="utf-8")
     (run / "agent_observations_h264.mp4").write_bytes(b"0123456789")
     return run
@@ -464,6 +470,18 @@ def test_codex_detail_joins_observable_activity_action_and_observation(tmp_path:
     root = tmp_path / "agent_runs"
     _make_codex_run(root)
     detail = RunRepository(root).detail("round/level1")
+    assert detail["task_prompt"] == "test prompt"
+    assert detail["prompt_context"]["scope"] == "benchmark_supplied"
+    assert [section["role"] for section in detail["prompt_context"]["sections"]] == [
+        "base",
+        "developer",
+        "operator",
+    ]
+    assert [section["text"] for section in detail["prompt_context"]["sections"]] == [
+        "base instructions",
+        "developer instructions",
+        "test prompt",
+    ]
     assert len(detail["steps"]) == 2
     assert detail["steps"][0]["messages"][0]["parts"] == ["start"]
     assert detail["steps"][0]["agent_activity"][0]["kind"] == "reasoning"

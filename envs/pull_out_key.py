@@ -1,9 +1,11 @@
 from ._base_task import *
 import numpy as np
 
+KEY_INITIAL_RELATIVE_YAW_RANGE_RAD = (-np.pi / 2, -np.pi / 4)
+
 @configclass
 class TaskCfg(BaseTaskCfg):
-    pass
+    key_initial_relative_yaw_rad: float | None = None
 
 class Task(BaseTask):
     def __init__(self, cfg: TaskCfg, mode:Literal['collect', 'eval'] = 'collect', render_mode: str|None = None, **kwargs):
@@ -36,7 +38,20 @@ class Task(BaseTask):
         key_pose = base_pose.add_bias([-0.0025, 0, 0.0785])
 
         base_pose = base_pose.add_rotation([0, 0, random_rotate])
-        self.key_rotation = self.rng.uniform(-np.pi/2, -np.pi/4)
+        configured_yaw = self.cfg.key_initial_relative_yaw_rad
+        if configured_yaw is None:
+            self.key_rotation = float(
+                self.rng.uniform(*KEY_INITIAL_RELATIVE_YAW_RANGE_RAD)
+            )
+            yaw_mode = 'legacy_random'
+        else:
+            configured_yaw = float(configured_yaw)
+            if not np.isfinite(configured_yaw):
+                raise ValueError('key_initial_relative_yaw_rad must be finite')
+            self.key_rotation = configured_yaw
+            yaw_mode = 'fixed'
+        self.metadata['key_initial_relative_yaw_mode'] = yaw_mode
+        self.metadata['key_initial_relative_yaw_rad'] = self.key_rotation
         key_pose = key_pose.add_rotation([0, 0, random_rotate+self.key_rotation])
 
         self.slot.set_pose(base_pose)

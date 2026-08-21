@@ -33,12 +33,17 @@ from agent_env.benchmark_protocol import (
     BenchmarkEpisodeProtocol,
     BenchmarkProtocolError,
 )
-from agent_env.benchmark_tasks import get_benchmark_task, list_benchmark_tasks
+from agent_env.benchmark_tasks import (
+    benchmark_task_parameters,
+    get_benchmark_task,
+    list_benchmark_tasks,
+)
 from agent_env.capabilities import CapabilityViolation
 from agent_env.contract import EVALUATOR_SEED_ENV
 from agent_env.icl import get_icl_condition, list_icl_conditions
 from scripts.run_codex_benchmark import (
     BASE_INSTRUCTIONS,
+    DEVELOPER_INSTRUCTIONS,
     codex_sandbox_policy,
     effective_codex_network_access,
     operator_prompt,
@@ -105,6 +110,31 @@ def test_only_two_new_tasks_are_registered() -> None:
     assert "already-grasped" in legacy_manifest["instruction"]
 
 
+def test_key_initial_yaw_defaults_to_legacy_random_and_accepts_fixed_override() -> None:
+    default = benchmark_task_parameters("pull_out_key")
+    assert default["key_initial_relative_yaw"]["mode"] == "legacy_random"
+    assert default["key_initial_relative_yaw"]["range_rad"] == pytest.approx(
+        [-1.5707963267948966, -0.7853981633974483]
+    )
+
+    fixed = benchmark_task_parameters(
+        "pull_out_key", key_initial_relative_yaw_rad=-1.5707963267948966
+    )
+    assert fixed["key_initial_relative_yaw"]["mode"] == "fixed"
+    assert fixed["key_initial_relative_yaw"]["value_rad"] == pytest.approx(
+        -1.5707963267948966
+    )
+
+    with pytest.raises(ValueError, match="only for pull_out_key"):
+        benchmark_task_parameters(
+            "put_bottle_in_shelf", key_initial_relative_yaw_rad=-1.0
+        )
+    with pytest.raises(ValueError, match="must be finite"):
+        benchmark_task_parameters(
+            "pull_out_key", key_initial_relative_yaw_rad=float("nan")
+        )
+
+
 def test_operator_prompt_discloses_configured_episode_token_budget() -> None:
     unlimited = operator_prompt("pull_out_key", pre_move=False)
     assert "cumulative output tokens" not in unlimited
@@ -143,6 +173,14 @@ def test_base_instruction_contains_only_robot_lifecycle_and_terminal_feedback() 
         "calling another robot-control tool. Task success is returned only by finish_episode.\n"
     )
     assert "runtime capabilities" not in BASE_INSTRUCTIONS
+
+
+def test_developer_instruction_requests_public_progress_without_strategy_fields() -> None:
+    assert "concise commentary update" in DEVELOPER_INSTRUCTIONS
+    assert "observable" in DEVELOPER_INSTRUCTIONS
+    assert "hidden chain-of-thought" in DEVELOPER_INSTRUCTIONS
+    assert "decision_record" not in DEVELOPER_INSTRUCTIONS
+    assert "rationale" not in DEVELOPER_INSTRUCTIONS
 
 
 def test_icl_axis_and_minimal_demo_discovery_notice() -> None:
@@ -208,6 +246,7 @@ def test_reference_runner_defaults_to_multiturn_and_network_enabled(
     assert defaults.codex_sandbox == "danger-full-access"
     assert defaults.codex_network_access is True
     assert defaults.effort == "high"
+    assert defaults.key_initial_relative_yaw_rad is None
 
     monkeypatch.setattr(
         sys,
@@ -223,6 +262,24 @@ def test_reference_runner_defaults_to_multiturn_and_network_enabled(
         ],
     )
     assert parse_args().codex_network_access is False
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_codex_benchmark.py",
+            "--task",
+            "pull_out_key",
+            "--profile",
+            "1",
+            "--key-initial-relative-yaw-rad",
+            "-1.5707963267948966",
+            "--dry-run",
+        ],
+    )
+    assert parse_args().key_initial_relative_yaw_rad == pytest.approx(
+        -1.5707963267948966
+    )
 
 
 def test_fixed_demo_excludes_its_seed_from_evaluation() -> None:
@@ -245,7 +302,7 @@ def test_fixed_demo_excludes_its_seed_from_evaluation() -> None:
     )
 
 
-def test_protocol_accepts_zero_step_and_enforces_all_bounds() -> None:
+def test_protocol_accepts_unbounded_finite_arm_deltas_and_physical_gripper_targets() -> None:
     protocol = BenchmarkEpisodeProtocol(get_observation_profile(6))
     assert protocol.MAX_STEPS == 50
     assert protocol.contract_manifest()["action_budget"] == {"step_eef": 50}
@@ -267,13 +324,37 @@ def test_protocol_accepts_zero_step_and_enforces_all_bounds() -> None:
             delta_rpy=[0, 0, 0],
             delta_gripper=0,
         )
-    with pytest.raises(BenchmarkProtocolError, match="norm"):
+    dp, dr, dg = protocol.prepare_step(
+        observation_id="obs_001",
+        delta_position=[0.4, -0.5, 0.6],
+        delta_rpy=[1.2, -0.9, 3.0],
+        delta_gripper=0,
+    )
+    assert dp.tolist() == [0.4, -0.5, 0.6]
+    assert dr.tolist() == [1.2, -0.9, 3.0]
+    assert dg == 0
+    _, _, dg = protocol.prepare_step(
+        observation_id="obs_001",
+        delta_position=[0, 0, 0],
+        delta_rpy=[0, 0, 0],
+        delta_gripper=0.019,
+        current_gripper_qpos=0.02,
+    )
+    assert dg == pytest.approx(0.019)
+    with pytest.raises(BenchmarkProtocolError, match="physical per-finger"):
         protocol.prepare_step(
             observation_id="obs_001",
-            delta_position=[0.04, 0.04, 0.04],
+            delta_position=[0, 0, 0],
             delta_rpy=[0, 0, 0],
-            delta_gripper=0,
+            delta_gripper=0.02,
+            current_gripper_qpos=0.02,
         )
+    contract = protocol.contract_manifest()["action_bounds"]
+    assert contract["translation_benchmark_limit"] is None
+    assert contract["rotation_benchmark_limit"] is None
+    assert contract["gripper_target_qpos_range_m"] == [0.0, 0.039]
+    assert "max_abs_translation_component_m" not in contract
+    assert "max_abs_rotation_component_rad" not in contract
     protocol.finish("obs_001")
     assert protocol.terminal
 
@@ -306,6 +387,11 @@ def test_dynamic_registry_contains_exactly_three_tools() -> None:
         "observation_id"
     }
     assert all(not tool.requires_decision_record for tool in registry.values())
+    step_schema = registry["step_eef"].input_schema["properties"]
+    assert "maximum" not in step_schema["delta_position"]["items"]
+    assert "maximum" not in step_schema["delta_rpy"]["items"]
+    assert step_schema["delta_gripper"]["minimum"] == -0.039
+    assert step_schema["delta_gripper"]["maximum"] == 0.039
 
     fixed_demo_registry = build_benchmark_tool_registry(
         get_observation_profile(6),
@@ -316,6 +402,65 @@ def test_dynamic_registry_contains_exactly_three_tools() -> None:
         fixed_demo_registry["step_eef"].input_schema
         == registry["step_eef"].input_schema
     )
+
+
+def test_gateway_forwards_large_arm_delta_but_rejects_physical_gripper_overrun(
+    tmp_path: Path,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def observation(observation_id: str) -> dict[str, object]:
+        return {
+            "observation_id": observation_id,
+            "modalities": {},
+            "robot_state": {
+                "joint_position_9d": [0.0] * 7 + [0.02, 0.02],
+                "joint_velocity_9d": [0.0] * 9,
+                "gripper_width_m": 0.04,
+                "end_effector_pose_robot_base_wxyz_7d": [0.0] * 7,
+            },
+        }
+
+    def simulator(command: dict[str, object]) -> dict[str, object]:
+        calls.append(command)
+        if command["command"] == "start":
+            return {"status": "rollout_started", "observation": observation("obs_000")}
+        return {"status": "action_complete", "observation": observation("obs_001")}
+
+    gateway = BenchmarkCapabilityGateway(
+        task=get_benchmark_task("pull_out_key"),
+        profile=get_observation_profile(1),
+        annotations=AnnotationCapabilities(False, False),
+        simulator_request=simulator,
+        simulator_run_dir=tmp_path,
+    )
+    assert gateway.execute("start_episode", {}).success
+    moved = gateway.execute(
+        "step_eef",
+        {
+            "observation_id": "obs_000",
+            "delta_position": [0.4, -0.5, 0.6],
+            "delta_rpy": [1.2, -0.9, 3.0],
+            "delta_gripper": 0,
+        },
+    )
+    assert moved.success
+    assert calls[-1]["delta_position"] == [0.4, -0.5, 0.6]
+    assert calls[-1]["delta_rpy"] == [1.2, -0.9, 3.0]
+
+    rejected = gateway.execute(
+        "step_eef",
+        {
+            "observation_id": "obs_001",
+            "delta_position": [0, 0, 0],
+            "delta_rpy": [0, 0, 0],
+            "delta_gripper": 0.02,
+        },
+    )
+    assert not rejected.success
+    assert rejected.execution_target == "rejected"
+    assert "physical target qpos" in rejected.raw_response["message"]
+    assert len(calls) == 2
 
 
 def test_capability_manifest_is_deterministic_and_task_specific() -> None:

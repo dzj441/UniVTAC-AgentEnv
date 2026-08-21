@@ -37,7 +37,7 @@ const refs = {
   videoPanel: document.querySelector("#video-panel"),
   episodeVideo: document.querySelector("#episode-video"),
   promptPanel: document.querySelector("#prompt-panel"),
-  taskPrompt: document.querySelector("#task-prompt"),
+  promptContext: document.querySelector("#prompt-context"),
   profileDetail: document.querySelector("#profile-detail"),
   timelineDescription: document.querySelector("#timeline-description"),
   showAll: document.querySelector("#show-all"),
@@ -398,7 +398,7 @@ function renderDetail() {
   renderCapabilities(detail.profile);
   refs.recordingNote.textContent = detail.recording_note;
   renderVideo(detail.artifacts);
-  renderPrompt(detail.task_prompt, detail.profile, run.kind);
+  renderPrompt(detail.prompt_context, detail.task_prompt, detail.profile, run.kind);
   refs.timelineDescription.textContent =
     run.kind === "codex"
       ? "每个 Agent 气泡按真实顺序展示动作前公开的 reasoning summary、命令、代码/文件、MCP、子 Agent、网络、图像与消息；紧随其后的 ENV 气泡展示实际反馈和新 observation。"
@@ -530,12 +530,35 @@ function renderVideo(artifacts) {
   }
 }
 
-function renderPrompt(prompt, profile, kind) {
-  refs.taskPrompt.textContent =
-    prompt ||
-    (kind === "capture"
-      ? "该运行由标准化采集脚本产生，没有 Codex operator prompt。"
-      : "本条记录没有落盘 operator prompt。");
+function renderPrompt(promptContext, legacyTaskPrompt, profile, kind) {
+  refs.promptContext.replaceChildren();
+  const sections = Array.isArray(promptContext?.sections)
+    ? promptContext.sections
+    : [{ role: "operator", label: "Operator / task prompt", text: legacyTaskPrompt }];
+  const hasPrompt = sections.some((section) => typeof section.text === "string" && section.text.length);
+  if (hasPrompt) {
+    for (const section of sections) {
+      const card = node("section", { className: `prompt-section prompt-${section.role || "unknown"}` });
+      card.append(node("h4", { text: section.label || section.role || "Prompt" }));
+      card.append(node("pre", {
+        text: typeof section.text === "string" && section.text.length
+          ? section.text
+          : "未设置",
+        className: section.text ? "" : "is-empty",
+      }));
+      refs.promptContext.append(card);
+    }
+    if (promptContext?.note) {
+      refs.promptContext.append(node("p", { className: "prompt-scope-note", text: promptContext.note }));
+    }
+  } else {
+    refs.promptContext.append(node("p", {
+      className: "prompt-empty",
+      text: kind === "capture"
+        ? "该运行由标准化采集脚本产生，没有 Codex prompt。"
+        : "本条记录没有落盘 Benchmark prompt。",
+    }));
+  }
   refs.profileDetail.replaceChildren();
   const card = node("div", { className: "profile-card" });
   card.append(node("h4", { text: profile.name || "Capability profile" }));

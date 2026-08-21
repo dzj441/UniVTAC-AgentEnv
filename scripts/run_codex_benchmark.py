@@ -32,6 +32,7 @@ from agent_env.benchmark_profiles import (  # noqa: E402
     get_observation_profile,
 )
 from agent_env.benchmark_tasks import (  # noqa: E402
+    benchmark_task_parameters,
     get_benchmark_task,
     list_benchmark_tasks,
 )
@@ -70,6 +71,14 @@ BASE_INSTRUCTIONS = """\
 Control the robot through start_episode, step_eef, and finish_episode. After each
 robot-control tool call, wait until its resulting observation is provided before
 calling another robot-control tool. Task success is returned only by finish_episode.
+"""
+
+
+DEVELOPER_INSTRUCTIONS = """\
+Before starting tool-based work, send a concise commentary update stating what you
+will inspect or do. During longer work, send further commentary when you obtain
+material evidence, finish a meaningful stage, or change approach. Report observable
+actions and conclusions, not hidden chain-of-thought.
 """
 
 
@@ -122,6 +131,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profile", required=True, choices=tuple(str(i) for i in range(1, 7)))
     parser.add_argument("--provide-bbox", action="store_true")
     parser.add_argument("--provide-mask", action="store_true")
+    parser.add_argument(
+        "--key-initial-relative-yaw-rad",
+        type=float,
+        default=None,
+        help=(
+            "Optional fixed pull_out_key yaw relative to its slot in radians; "
+            "the default uses the legacy random range [-pi/2, -pi/4]."
+        ),
+    )
     parser.add_argument(
         "--icl",
         default="none",
@@ -309,6 +327,10 @@ def main() -> int:
     run_started = time.monotonic()
     args = parse_args()
     task = get_benchmark_task(args.task)
+    task_parameters = benchmark_task_parameters(
+        task.name,
+        key_initial_relative_yaw_rad=args.key_initial_relative_yaw_rad,
+    )
     profile = get_observation_profile(args.profile)
     annotations = AnnotationCapabilities(args.provide_bbox, args.provide_mask)
     icl_condition = get_icl_condition(args.icl)
@@ -366,6 +388,7 @@ def main() -> int:
         "schema_version": "univtac.embodied_codex_rollout_outcome.v1",
         "created_utc": utc_now(),
         "task": task.name,
+        "task_parameters": task_parameters,
         "start_condition": task.start_condition(args.pre_move),
         "pre_move_enabled": bool(args.pre_move),
         "profile": profile.name,
@@ -403,6 +426,13 @@ def main() -> int:
             simulator_command.append("--provide-mask")
         if args.pre_move:
             simulator_command.append("--pre-move")
+        if args.key_initial_relative_yaw_rad is not None:
+            simulator_command.extend(
+                [
+                    "--key-initial-relative-yaw-rad",
+                    str(args.key_initial_relative_yaw_rad),
+                ]
+            )
         simulator = SimulatorProcessClient(
             simulator_command,
             cwd=REPO_ROOT,
@@ -420,6 +450,8 @@ def main() -> int:
             raise RuntimeError("Simulator pre-move condition disagrees with the host request")
         if ready.get("start_condition") != task.start_condition(args.pre_move):
             raise RuntimeError("Simulator start condition disagrees with the host registry")
+        if ready.get("task_parameters") != task_parameters:
+            raise RuntimeError("Simulator task parameters disagree with the host request")
 
         recorder = EventRecorder(run_dir)
         prompt = operator_prompt(
@@ -432,6 +464,9 @@ def main() -> int:
         (run_dir / "codex_operator_prompt.txt").write_text(prompt, encoding="utf-8")
         (run_dir / "codex_base_instructions.txt").write_text(
             BASE_INSTRUCTIONS, encoding="utf-8"
+        )
+        (run_dir / "codex_developer_instructions.txt").write_text(
+            DEVELOPER_INSTRUCTIONS, encoding="utf-8"
         )
         write_json(run_dir / "codex_capabilities.json", capabilities)
 
@@ -486,6 +521,7 @@ def main() -> int:
                 "schema_version": "univtac.embodied_codex_rollout_manifest.v1",
                 "created_utc": utc_now(),
                 "task": task.to_manifest(pre_move=args.pre_move),
+                "task_parameters": task_parameters,
                 "start_condition": task.start_condition(args.pre_move),
                 "pre_move_enabled": bool(args.pre_move),
                 "observation_profile": profile.to_manifest(),
@@ -524,8 +560,8 @@ def main() -> int:
                 "operator_prompt_sha256": sha256_text(prompt),
                 "base_instructions_file": "codex_base_instructions.txt",
                 "base_instructions_sha256": sha256_text(BASE_INSTRUCTIONS),
-                "developer_instructions_file": None,
-                "developer_instructions_sha256": None,
+                "developer_instructions_file": "codex_developer_instructions.txt",
+                "developer_instructions_sha256": sha256_text(DEVELOPER_INSTRUCTIONS),
                 "capability_manifest_file": "codex_capabilities.json",
                 "capability_manifest_sha256": capabilities["sha256"],
                 "simulator_ready_commitment": ready.get("seed_commitment_sha256"),
@@ -584,7 +620,7 @@ def main() -> int:
                 gateway=gateway,
                 model=args.model,
                 base_instructions=BASE_INSTRUCTIONS,
-                developer_instructions=None,
+                developer_instructions=DEVELOPER_INSTRUCTIONS,
                 sandbox=args.codex_sandbox,
             )
             turn_summaries: list[dict[str, Any]] = []
