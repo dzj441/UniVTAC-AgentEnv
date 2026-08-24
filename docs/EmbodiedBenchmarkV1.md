@@ -141,10 +141,16 @@ Bottle 的 release 阈值为 gripper qpos `>= 0.0175 m`；稳定要求 60 steps 
 
 `step_eef` 按实际非零分量路由：仅 EEF 改变时使用 `move`，仅 gripper 改变时使用
 `gripper`，两者都改变时才使用 `all`。全零动作合法，并以不调用 arm/gripper planner 的
-固定 20 physics steps wait 等待物理稳定。这样纯夹爪和 wait 不会因为无关的 cuRobo arm
+固定 20 physics steps wait 作为其控制阶段。这样纯夹爪和 wait 不会因为无关的 cuRobo arm
 planning failure 而被拒绝。每个 step 必须引用最新 `observation_id`；陈旧 ID、
 未知字段、非有限数和超出物理开合范围的 gripper 目标在改变世界之前被拒绝。接口不返回目标方向、目标半空间、
 语义动作提示、actor pose、IK/joint target 或过程 task success。
+
+每个通过协议校验的 `step_eef` 在控制阶段结束后，默认统一推进 60 个 post-action settling
+physics steps，再采集下一条 Agent-visible observation；该时序在 recorder 关闭或编码失败时
+仍保持不变。全零动作因此默认是 20-step no-op 控制加 60-step 公共 settling。连续 recorder
+可以只保存 settling 的前缀，但不能超过这 60 steps；省略 recorder 子窗口配置时默认完整
+记录。精确定义见 [`SimulatorStepWindowRecorder.md`](SimulatorStepWindowRecorder.md)。
 
 每个 arm planning 结果的原始 cuRobo status、query validity、attempt 数、timing 和终端误差
 仅写入终局生成且权限为 `0600` 的 evaluator-private audit。Agent-visible response 仍只有
@@ -384,6 +390,9 @@ P6 rollout 的成功轨迹分布校准，再将两个名字映射到冻结的数
 - `agent_transcript.jsonl`：完整公开命令/响应流；
 - `observations/obs_*/`：RGB、tactile、depth、calibration、annotation 和 composite；
 - `agent_observations_h264.mp4`：H.264/yuv420p 完整 observation 回放；
+- `sim_step_composite_h264.mp4`：仅覆盖 simulator-active 动作窗口的 head/wrist/双触觉
+  连续诊断录像；对应 frame index 与配置见
+  [`SimulatorStepWindowRecorder.md`](SimulatorStepWindowRecorder.md)；
 - `evaluator_outcome.json`：仅终局公开的 success 和细分 checker；
 - `evaluator_private_audit.json`：终局才生成、权限 0600 的 host 审计。
 

@@ -35,7 +35,10 @@ const refs = {
   capabilityRow: document.querySelector("#capability-row"),
   recordingNote: document.querySelector("#recording-note"),
   videoPanel: document.querySelector("#video-panel"),
+  videoTitle: document.querySelector("#video-title"),
+  videoSwitcher: document.querySelector("#video-switcher"),
   episodeVideo: document.querySelector("#episode-video"),
+  videoNote: document.querySelector("#video-note"),
   promptPanel: document.querySelector("#prompt-panel"),
   promptContext: document.querySelector("#prompt-context"),
   profileDetail: document.querySelector("#profile-detail"),
@@ -519,14 +522,38 @@ function renderCapabilities(profile = {}) {
 }
 
 function renderVideo(artifacts) {
-  const video = artifacts.find((item) => item.type === "video");
-  refs.videoPanel.classList.toggle("is-hidden", !video);
+  const videos = artifacts.filter((item) => item.type === "video");
+  refs.videoPanel.classList.toggle("is-hidden", !videos.length);
   refs.episodeVideo.pause();
   refs.episodeVideo.removeAttribute("src");
   refs.episodeVideo.load();
-  if (video) {
+  refs.videoSwitcher.replaceChildren();
+
+  const selectVideo = (video) => {
     refs.episodeVideo.src = artifactUrl(video.path);
     refs.episodeVideo.load();
+    const continuous = video.path === "sim_step_composite_h264.mp4";
+    refs.videoTitle.textContent = video.label;
+    refs.videoNote.textContent = continuous
+      ? "仅拼接 simulator-active 窗口：step_eef 控制轨迹、动作后 settling 与 finish_episode settling；不包含 Agent 思考等待时间。"
+      : "每一帧对应一次公开 observation；它是决策回放，不是逐 physics-step 录像。";
+    for (const button of refs.videoSwitcher.children) {
+      button.classList.toggle("is-active", button.dataset.path === video.path);
+    }
+  };
+
+  for (const video of videos) {
+    const button = node("button", {
+      className: "video-choice",
+      text: video.label,
+      type: "button",
+    });
+    button.dataset.path = video.path;
+    button.addEventListener("click", () => selectVideo(video));
+    refs.videoSwitcher.append(button);
+  }
+  if (videos.length) {
+    selectVideo(videos[0]);
   }
 }
 

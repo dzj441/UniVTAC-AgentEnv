@@ -163,7 +163,9 @@ observation. After the Codex turn is complete, the host additionally builds
 based on that observation on the right. It includes exact compact arguments,
 execution target, accepted/rejected status, returned observation id, and a
 bounded preview of the public decision rationale. Neither file is a continuous
-every-physics-step recording.
+every-physics-step recording. Generic v1 runs now add a separate evaluator-private
+`sim_step_composite_h264.mp4`, sampled only during simulator-active action windows;
+see [`SimulatorStepWindowRecorder.md`](SimulatorStepWindowRecorder.md).
 The timeline uses 1 FPS so the compact call panel is readable during normal
 playback; the sensor-only replay retains the existing 2 FPS encoding.
 

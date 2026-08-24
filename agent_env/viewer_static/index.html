@@ -96,12 +96,13 @@
               <div class="panel-heading">
                 <div>
                   <p class="eyebrow">FULL EPISODE</p>
-                  <h3>Observation 视频</h3>
+                  <h3 id="video-title">Episode 视频</h3>
                 </div>
-                <span class="video-format">H.264 · yuv420p</span>
+                <span class="video-format" id="video-format">H.264 · yuv420p</span>
               </div>
+              <div class="video-switcher" id="video-switcher"></div>
               <video id="episode-video" controls preload="metadata" playsinline></video>
-              <p class="video-note">每一帧对应一次公开 observation；它是决策回放，不是逐 physics-step 录像。</p>
+              <p class="video-note" id="video-note"></p>
             </article>
           </section>
 

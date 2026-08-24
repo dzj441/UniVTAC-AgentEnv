@@ -300,6 +300,15 @@ def _make_codex_run(root: Path) -> Path:
     )
     (run / "codex_operator_prompt.txt").write_text("test prompt", encoding="utf-8")
     (run / "agent_observations_h264.mp4").write_bytes(b"0123456789")
+    (run / "sim_step_composite_h264.mp4").write_bytes(b"abcdefghij")
+    _write_json(
+        run / "sim_step_recorder_manifest.json",
+        {"schema_version": "univtac.sim_step_recorder.v1", "frame_count": 12},
+    )
+    _write_jsonl(
+        run / "sim_step_frames.jsonl",
+        [{"video_frame_index": 0, "sim_step": 10, "phase": "control"}],
+    )
     return run
 
 
@@ -464,6 +473,8 @@ def test_repository_discovers_codex_and_capture_runs(tmp_path: Path) -> None:
     assert codex["icl"] == "fixed_demo"
     assert codex["bbox"] is True
     assert codex["mask"] is False
+    assert codex["has_video"] is True
+    assert codex["has_sim_step_video"] is True
 
 
 def test_codex_detail_joins_observable_activity_action_and_observation(tmp_path: Path) -> None:
@@ -514,6 +525,12 @@ def test_codex_detail_joins_observable_activity_action_and_observation(tmp_path:
     assert detail["tail_agent_activity"][0]["parts"] == ["done"]
     assert probe["agent_activity"][3]["label"] == "Collaboration tool call"
     assert detail["agent_activity_count"] == 6
+    assert [artifact["path"] for artifact in detail["artifacts"][:4]] == [
+        "sim_step_composite_h264.mp4",
+        "agent_observations_h264.mp4",
+        "sim_step_recorder_manifest.json",
+        "sim_step_frames.jsonl",
+    ]
 
 
 def test_app_server_activity_does_not_depend_on_decision_records(tmp_path: Path) -> None:

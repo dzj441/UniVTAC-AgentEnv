@@ -67,6 +67,12 @@ from agent_env.benchmark_tasks import (
 from agent_env.contract import consume_private_evaluator_seed
 from agent_env.expert_tasks import BASE_TASK_SUCCESS
 from agent_env.nvidia_runtime import audit_current_process
+from agent_env.sim_step_recorder import (
+    DEFAULT_FRAMES_PER_SECOND,
+    DEFAULT_POST_ACTION_SETTLE_STEPS,
+    SimStepRecorderConfig,
+    SimulationStepRecorder,
+)
 from isaaclab.app import AppLauncher
 
 
@@ -81,6 +87,23 @@ INSTANCE_DATA_TYPE = "instance_id_segmentation_fast"
 
 
 PRIVATE_EVALUATOR_SEED = consume_private_evaluator_seed(os.environ)
+
+
+def positive_float(value: str) -> float:
+    parsed = float(value)
+    if not np.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive finite number")
+    return parsed
+
+
+def non_negative_integer(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a non-negative integer") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be a non-negative integer")
+    return parsed
 
 
 def parse_args() -> argparse.Namespace:
@@ -110,9 +133,48 @@ def parse_args() -> argparse.Namespace:
             "The v1 default is an ungrasped object and the robot's fixed home state."
         ),
     )
+    parser.add_argument(
+        "--sim-step-recorder",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Record evaluator-private continuous head/wrist/tactile video during "
+            "step_eef and terminal simulation windows."
+        ),
+    )
+    parser.add_argument(
+        "--sim-step-recorder-fps",
+        type=positive_float,
+        default=DEFAULT_FRAMES_PER_SECOND,
+    )
+    parser.add_argument(
+        "--post-action-settle-steps",
+        type=non_negative_integer,
+        default=DEFAULT_POST_ACTION_SETTLE_STEPS,
+        help=(
+            "Deterministic physics steps appended after every step_eef before "
+            "the next Agent-visible observation."
+        ),
+    )
+    parser.add_argument(
+        "--sim-step-recorder-post-action-steps",
+        type=non_negative_integer,
+        default=None,
+        help=(
+            "How many post-action settling steps to record. Defaults to all "
+            "--post-action-settle-steps and cannot exceed that value."
+        ),
+    )
     parser.add_argument("--run-dir", type=Path, default=None)
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
+    if args.sim_step_recorder_post_action_steps is None:
+        args.sim_step_recorder_post_action_steps = args.post_action_settle_steps
+    if args.sim_step_recorder_post_action_steps > args.post_action_settle_steps:
+        parser.error(
+            "--sim-step-recorder-post-action-steps cannot exceed "
+            "--post-action-settle-steps"
+        )
     args.enable_cameras = True
     args.num_envs = 1
     # TacEx marker rendering uses the official rendering experience selected by
@@ -169,6 +231,14 @@ class AgentEnvTask(TASK_CLASS):
             super().pre_move()
             return
         self.initialize_task_references()
+
+    def _step(self, is_save: bool = True):
+        previous_step = self.step_count
+        result = super()._step(is_save=is_save)
+        recorder = getattr(self, "_sim_step_recorder", None)
+        if recorder is not None and self.step_count != previous_step:
+            recorder.on_sim_step(self.step_count)
+        return result
 
 
 def utc_now() -> str:
@@ -233,6 +303,8 @@ class EmbodiedAgentEnv:
         profile: ObservationProfile,
         annotations: AnnotationCapabilities,
         run_dir: Path,
+        sim_step_recorder_config: SimStepRecorderConfig,
+        post_action_settle_steps: int,
     ) -> None:
         self.task = task
         self.task_spec = task_spec
@@ -256,11 +328,36 @@ class EmbodiedAgentEnv:
         self._observation_index = 0
         self._rollout_start_time = 0.0
         self._private_events: list[dict[str, Any]] = []
+        if post_action_settle_steps < 0:
+            raise ValueError("post_action_settle_steps must be non-negative")
+        if (
+            sim_step_recorder_config.post_action_record_steps
+            > post_action_settle_steps
+        ):
+            raise ValueError(
+                "recorder post-action steps cannot exceed environment settling steps"
+            )
+        self.post_action_settle_steps = int(post_action_settle_steps)
+        self.step_eef_timing = {
+            "post_action_settle_physics_steps": self.post_action_settle_steps,
+            "post_action_settle_seconds": float(
+                self.post_action_settle_steps * self.task.cfg.sim.dt
+            ),
+            "observation_captured_after_settle": True,
+            "independent_of_recorder_enablement": True,
+        }
         self._inhand_reference_tracker = PostGraspReferenceTracker(
             required=(
                 task_spec.requires_post_grasp_reference and not PRE_MOVE_ENABLED
             )
         )
+        self.sim_step_recorder = SimulationStepRecorder(
+            run_dir=self.run_dir,
+            physics_dt=float(self.task.cfg.sim.dt),
+            config=sim_step_recorder_config,
+            frame_supplier=self._sim_step_recorder_panels,
+        )
+        self.task._sim_step_recorder = self.sim_step_recorder
 
     def write_manifest(self) -> None:
         manifest = self.protocol.contract_manifest()
@@ -304,9 +401,17 @@ class EmbodiedAgentEnv:
                     **audit_current_process(bundle_root),
                 },
                 "replay_video": "H.264 yuv420p fast-start MP4 from public panels only",
+                "step_eef_timing": self.step_eef_timing,
+                "sim_step_recorder": self.sim_step_recorder.contract_manifest(),
                 "audit_files": {
                     "public": ["manifest.json", "agent_transcript.jsonl", "evaluator_outcome.json"],
                     "private_terminal_only": "evaluator_private_audit.json (mode 0600)",
+                    "evaluator_private_simulator_recording": [
+                        "sim_step_composite_h264.mp4",
+                        "sim_step_frames.jsonl",
+                        "sim_step_recorder_manifest.json",
+                    ],
+                    "simulator_recording_agent_visible": False,
                 },
             }
         )
@@ -350,6 +455,19 @@ class EmbodiedAgentEnv:
                     "prior_observation_id": self.protocol.current_observation_id,
                 },
             )
+
+    def _sim_step_recorder_panels(self) -> dict[str, np.ndarray]:
+        raw = self.task._get_observations()
+        return {
+            "head_rgb": tensor_to_rgb(raw["observation"]["head"]["rgb"]),
+            "wrist_rgb": tensor_to_rgb(raw["observation"]["wrist"]["rgb"]),
+            "left_tactile_rgb": tensor_to_rgb(
+                raw["tactile"]["left_tactile"]["rgb_marker"]
+            ),
+            "right_tactile_rgb": tensor_to_rgb(
+                raw["tactile"]["right_tactile"]["rgb_marker"]
+            ),
+        }
 
     def _camera_info_for_instance(self, camera: Any) -> Any:
         info: Any = camera.data.info
@@ -570,13 +688,34 @@ class EmbodiedAgentEnv:
         )
         prior_observation_id = self.protocol.current_observation_id
         action = np.concatenate((dp, dr, [dg])).astype(np.float32)
+        public_action = {
+            "delta_position_world_m": dp.tolist(),
+            "delta_rpy_world_rad": dr.tolist(),
+            "delta_gripper_m": dg,
+        }
         self.task.eval_success = False
         self.task.plan_success = True
-        started = time.perf_counter()
-        execution_succeeded, private_checker_value = self.task.take_action(
-            action, action_type="delta_ee"
+        action_start_sim_step = int(self.task.step_count)
+        self.sim_step_recorder.begin_step_eef(
+            action_index=self.protocol.step_count + 1,
+            prior_observation_id=prior_observation_id,
+            action=public_action,
+            sim_step=self.task.step_count,
         )
+        started = time.perf_counter()
+        try:
+            execution_succeeded, private_checker_value = self.task.take_action(
+                action, action_type="delta_ee"
+            )
+        except BaseException as exc:
+            self.sim_step_recorder.abort_step_eef(
+                sim_step=self.task.step_count,
+                error=exc,
+                control_wall_seconds=time.perf_counter() - started,
+            )
+            raise
         duration = time.perf_counter() - started
+        control_end_sim_step = int(self.task.step_count)
         self._update_post_grasp_reference(
             delta_position=dp,
             delta_rpy=dr,
@@ -588,6 +727,20 @@ class EmbodiedAgentEnv:
         self.task.eval_success = False
         if not execution_succeeded:
             self.task.plan_success = True
+        self.sim_step_recorder.begin_post_action_settle(sim_step=self.task.step_count)
+        if self.post_action_settle_steps:
+            self.task.delay(
+                steps=self.post_action_settle_steps,
+                is_save=False,
+                force=True,
+            )
+        self.sim_step_recorder.end_step_eef(
+            sim_step=self.task.step_count,
+            execution_succeeded=bool(execution_succeeded),
+            control_route=getattr(self.task, "last_delta_ee_route", None),
+            control_wall_seconds=duration,
+        )
+        settle_end_sim_step = int(self.task.step_count)
         observation_id = self._next_observation_id()
         self.protocol.complete_step(observation_id)
         observation = self._capture_observation(observation_id)
@@ -598,6 +751,14 @@ class EmbodiedAgentEnv:
                 "base_task_checker_value": bool(private_checker_value),
                 "execution_succeeded": bool(execution_succeeded),
                 "control_route": getattr(self.task, "last_delta_ee_route", None),
+                "simulator_timing": {
+                    "action_start_sim_step": action_start_sim_step,
+                    "control_end_sim_step": control_end_sim_step,
+                    "settle_end_sim_step": settle_end_sim_step,
+                    "post_action_settle_physics_steps_executed": (
+                        settle_end_sim_step - control_end_sim_step
+                    ),
+                },
                 "curobo_motion_gen": getattr(
                     self.task._robot_manager,
                     "last_arm_plan_diagnostics",
@@ -610,9 +771,7 @@ class EmbodiedAgentEnv:
             "prior_observation_id": prior_observation_id,
             "action": {
                 "primitive": "step_eef_delta",
-                "delta_position_world_m": dp.tolist(),
-                "delta_rpy_world_rad": dr.tolist(),
-                "delta_gripper_m": dg,
+                **public_action,
             },
             "execution_succeeded": bool(execution_succeeded),
             "execution_duration_seconds": duration,
@@ -626,7 +785,12 @@ class EmbodiedAgentEnv:
         pose_before = pose_snapshot(manipulated)
         self.task.eval_success = False
         self.task.plan_success = True
+        self.sim_step_recorder.begin_terminal_settle(
+            observation_id=current_observation_id,
+            sim_step=self.task.step_count,
+        )
         self.task.delay(steps=FINISH_SETTLE_STEPS, is_save=False, force=True)
+        self.sim_step_recorder.end_terminal_settle(sim_step=self.task.step_count)
         pose_after = pose_snapshot(manipulated)
         drift_translation, drift_rotation = pose_drift(pose_before, pose_after)
         base_success = bool(self.task.check_success())
@@ -670,6 +834,7 @@ class EmbodiedAgentEnv:
             )
         except Exception as exc:
             replay_video = {"error_type": type(exc).__name__, "message": str(exc)}
+        sim_step_recording = self.sim_step_recorder.finalize()
         outcome = {
             "timestamp_utc": utc_now(),
             "terminal_reason": "agent_finish",
@@ -690,6 +855,8 @@ class EmbodiedAgentEnv:
             "seed_commitment_sha256": self.seed_commitment,
             "commitment_verified": True,
             "replay_video": replay_video,
+            "step_eef_timing": self.step_eef_timing,
+            "sim_step_recording": sim_step_recording,
         }
         write_json(self.outcome_path, outcome)
         write_json(
@@ -705,10 +872,17 @@ class EmbodiedAgentEnv:
             },
             private=True,
         )
-        self.record_public("terminal_outcome", outcome)
+        # agentic team comment: The continuous simulator recording is an
+        # agentic team comment: evaluator artifact, never a Profile modality.
+        agent_visible_outcome = {
+            key: value
+            for key, value in outcome.items()
+            if key != "sim_step_recording"
+        }
+        self.record_public("terminal_outcome", agent_visible_outcome)
         return {
             "status": "rollout_finished",
-            **outcome,
+            **agent_visible_outcome,
             "observation": final_observation,
         }
 
@@ -726,6 +900,9 @@ class EmbodiedAgentEnv:
                 raise RuntimeError("close is allowed only after terminal evaluation")
             return {"status": "closing", "run_dir": str(self.run_dir)}
         raise ValueError(f"Unknown command: {name!r}")
+
+    def close(self) -> dict[str, Any]:
+        return self.sim_step_recorder.finalize()
 
 
 def make_run_dir() -> Path:
@@ -767,7 +944,7 @@ def make_task(run_dir: Path) -> AgentEnvTask:
         "camera": camera_observations,
         "embodiment": ["joint", "ee"],
     }
-    if PROFILE.expose_tactile:
+    if PROFILE.expose_tactile or ARGS.sim_step_recorder:
         cfg.obs_data_type["tactile"] = ["rgb_marker"]
     if {camera.name for camera in cfg.cameras} != {"head", "wrist"}:
         raise RuntimeError("TaskCfg must provide exactly head and wrist cameras")
@@ -792,7 +969,19 @@ def emit(env: EmbodiedAgentEnv, payload: dict[str, Any]) -> None:
 def main() -> None:
     run_dir = make_run_dir()
     task = make_task(run_dir)
-    env = EmbodiedAgentEnv(task, TASK_SPEC, PROFILE, ANNOTATIONS, run_dir)
+    env = EmbodiedAgentEnv(
+        task,
+        TASK_SPEC,
+        PROFILE,
+        ANNOTATIONS,
+        run_dir,
+        SimStepRecorderConfig(
+            enabled=bool(ARGS.sim_step_recorder),
+            frames_per_second=ARGS.sim_step_recorder_fps,
+            post_action_record_steps=ARGS.sim_step_recorder_post_action_steps,
+        ),
+        post_action_settle_steps=ARGS.post_action_settle_steps,
+    )
     env.write_manifest()
     env.record_public(
         "bridge_ready",
@@ -821,6 +1010,8 @@ def main() -> None:
             "seed_commitment_sha256": env.seed_commitment,
             "command_schema": public_benchmark_command_schema(),
             "agent_tools": ["start_episode", "step_eef", "finish_episode"],
+            "step_eef_timing": env.step_eef_timing,
+            "sim_step_recorder": env.sim_step_recorder.contract_manifest(),
         },
     )
 
@@ -858,6 +1049,7 @@ def main() -> None:
     finally:
         if not close_requested:
             env.record_public("bridge_stopped_without_close", {})
+        env.close()
         task.close()
 
 

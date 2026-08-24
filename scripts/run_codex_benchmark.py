@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import subprocess
 import sys
@@ -65,6 +66,10 @@ from agent_env.icl import (  # noqa: E402
     list_icl_conditions,
 )
 from agent_env.stdio_bridge import SimulatorProcessClient  # noqa: E402
+from agent_env.sim_step_recorder import (  # noqa: E402
+    DEFAULT_FRAMES_PER_SECOND,
+    DEFAULT_POST_ACTION_SETTLE_STEPS,
+)
 
 
 BASE_INSTRUCTIONS = """\
@@ -118,6 +123,26 @@ def positive_integer(value: str) -> int:
         raise argparse.ArgumentTypeError("must be a positive integer") from exc
     if parsed <= 0:
         raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
+def positive_float(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a positive finite number") from exc
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive finite number")
+    return parsed
+
+
+def non_negative_integer(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a non-negative integer") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be a non-negative integer")
     return parsed
 
 
@@ -203,8 +228,48 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--timeout-seconds", type=float, default=3600.0)
+    parser.add_argument(
+        "--sim-step-recorder",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Record evaluator-private simulator-active head/wrist/tactile windows "
+            "for each step_eef and finish_episode."
+        ),
+    )
+    parser.add_argument(
+        "--sim-step-recorder-fps",
+        type=positive_float,
+        default=DEFAULT_FRAMES_PER_SECOND,
+    )
+    parser.add_argument(
+        "--post-action-settle-steps",
+        type=non_negative_integer,
+        default=DEFAULT_POST_ACTION_SETTLE_STEPS,
+        help=(
+            "Deterministic physics steps after every accepted step_eef and before "
+            "the next Agent-visible observation."
+        ),
+    )
+    parser.add_argument(
+        "--sim-step-recorder-post-action-steps",
+        type=non_negative_integer,
+        default=None,
+        help=(
+            "Recorded subset of the post-action settling window. Defaults to the "
+            "full --post-action-settle-steps value and cannot exceed it."
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.sim_step_recorder_post_action_steps is None:
+        args.sim_step_recorder_post_action_steps = args.post_action_settle_steps
+    if args.sim_step_recorder_post_action_steps > args.post_action_settle_steps:
+        parser.error(
+            "--sim-step-recorder-post-action-steps cannot exceed "
+            "--post-action-settle-steps"
+        )
+    return args
 
 
 def resolve_run_dir(
@@ -404,6 +469,14 @@ def main() -> int:
             "configuration_source": "evaluator Codex configuration",
         },
         "inference_budget": budget_contract,
+        "sim_step_recorder_requested": {
+            "enabled": bool(args.sim_step_recorder),
+            "frames_per_second": args.sim_step_recorder_fps,
+            "post_action_record_steps": args.sim_step_recorder_post_action_steps,
+        },
+        "step_eef_timing_requested": {
+            "post_action_settle_physics_steps": args.post_action_settle_steps,
+        },
         "run_dir": str(run_dir),
         "valid_for_scoring": False,
         "status": "starting",
@@ -419,6 +492,17 @@ def main() -> int:
             args.device,
             "--run-dir",
             str(run_dir),
+            (
+                "--sim-step-recorder"
+                if args.sim_step_recorder
+                else "--no-sim-step-recorder"
+            ),
+            "--sim-step-recorder-fps",
+            str(args.sim_step_recorder_fps),
+            "--post-action-settle-steps",
+            str(args.post_action_settle_steps),
+            "--sim-step-recorder-post-action-steps",
+            str(args.sim_step_recorder_post_action_steps),
         ]
         if annotations.provide_bbox:
             simulator_command.append("--provide-bbox")
@@ -452,6 +536,39 @@ def main() -> int:
             raise RuntimeError("Simulator start condition disagrees with the host registry")
         if ready.get("task_parameters") != task_parameters:
             raise RuntimeError("Simulator task parameters disagree with the host request")
+        step_eef_timing = ready.get("step_eef_timing")
+        if not isinstance(step_eef_timing, dict):
+            raise RuntimeError("Simulator did not publish its step_eef timing contract")
+        if (
+            step_eef_timing.get("post_action_settle_physics_steps")
+            != args.post_action_settle_steps
+        ):
+            raise RuntimeError(
+                "Simulator post-action settling disagrees with the host request"
+            )
+        if step_eef_timing.get("independent_of_recorder_enablement") is not True:
+            raise RuntimeError("Simulator settling remains coupled to recorder enablement")
+        recorder_contract = ready.get("sim_step_recorder")
+        if not isinstance(recorder_contract, dict):
+            raise RuntimeError("Simulator did not publish its sim-step recorder contract")
+        if recorder_contract.get("enabled") is not bool(args.sim_step_recorder):
+            raise RuntimeError("Simulator recorder enablement disagrees with the host request")
+        if not math.isclose(
+            float(recorder_contract.get("requested_frames_per_second", float("nan"))),
+            args.sim_step_recorder_fps,
+            rel_tol=0,
+            abs_tol=1e-12,
+        ):
+            raise RuntimeError("Simulator recorder FPS disagrees with the host request")
+        if (
+            recorder_contract.get("post_action_record_physics_steps")
+            != args.sim_step_recorder_post_action_steps
+        ):
+            raise RuntimeError(
+                "Simulator recorder post-action window disagrees with the host request"
+            )
+        result["step_eef_timing"] = step_eef_timing
+        result["sim_step_recorder"] = recorder_contract
 
         recorder = EventRecorder(run_dir)
         prompt = operator_prompt(
@@ -554,6 +671,8 @@ def main() -> int:
                     ),
                 },
                 "inference_budget": budget_contract,
+                "step_eef_timing": step_eef_timing,
+                "sim_step_recorder": recorder_contract,
                 "codex_version": command_version(args.codex_bin),
                 "app_server_command": app_server_command,
                 "operator_prompt_file": "codex_operator_prompt.txt",
@@ -601,6 +720,19 @@ def main() -> int:
                     "published_messages_and_reasoning_summaries": "codex_messages.jsonl",
                     "simulator_transcript": "agent_transcript.jsonl",
                     "sensor_video": "agent_observations_h264.mp4",
+                    "simulator_action_window_video": (
+                        "sim_step_composite_h264.mp4"
+                        if recorder_contract["enabled"]
+                        else None
+                    ),
+                    "simulator_action_window_manifest": (
+                        "sim_step_recorder_manifest.json"
+                    ),
+                    "simulator_action_window_frame_index": (
+                        "sim_step_frames.jsonl"
+                        if recorder_contract["enabled"]
+                        else None
+                    ),
                     "agent_timeline_video": "agent_timeline_h264.mp4",
                     "hidden_chain_of_thought": "not exposed by the Codex protocol",
                 },
@@ -778,6 +910,9 @@ def main() -> int:
                     )
                 )
                 evaluator_outcome = read_json(run_dir / "evaluator_outcome.json")
+                result["sim_step_recording"] = evaluator_outcome.get(
+                    "sim_step_recording"
+                )
                 score = build_benchmark_score(
                     valid_for_scoring=result["valid_for_scoring"],
                     official_task_success=evaluator_outcome.get("official_task_success"),

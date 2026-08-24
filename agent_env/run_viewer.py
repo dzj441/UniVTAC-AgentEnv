@@ -1136,6 +1136,9 @@ class RunRepository:
             "message_count": len(messages),
             "observation_count": observation_count,
             "has_video": (run.directory / "agent_observations_h264.mp4").is_file(),
+            "has_sim_step_video": (
+                run.directory / "sim_step_composite_h264.mp4"
+            ).is_file(),
             "has_trace": (run.directory / "CODEX_TRACE.md").is_file(),
             "outcome": _selected_outcome(evaluator),
         }
@@ -1178,7 +1181,18 @@ class RunRepository:
         runtime = runtime if isinstance(runtime, dict) else {}
         artifacts = []
         for path, label, media_type in (
+            (
+                "sim_step_composite_h264.mp4",
+                "连续仿真动作窗口回放",
+                "video",
+            ),
             ("agent_observations_h264.mp4", "完整 Observation 回放", "video"),
+            (
+                "sim_step_recorder_manifest.json",
+                "连续仿真录像 manifest",
+                "json",
+            ),
+            ("sim_step_frames.jsonl", "连续仿真录像帧索引", "text"),
             ("CODEX_TRACE.md", "中文 Codex Trace", "text"),
             ("codex_operator_prompt.txt", "Codex task prompt", "text"),
             ("codex_base_instructions.txt", "Codex base instructions", "text"),

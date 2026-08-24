@@ -83,6 +83,9 @@ Head、wrist、左右 tactile 图按 Level/Profile 实际开放的模态显示�
 - `codex_run_manifest.json`、`codex_run_outcome.json` 与
   `evaluator_outcome.json`：能力、模型、审计和终局结果；
 - `agent_observations_h264.mp4`：完整公开 observation 回放。
+- `sim_step_composite_h264.mp4`：evaluator-private 的连续仿真动作窗口回放；页面可在两条
+  视频间切换，详细时间语义见
+  [`SimulatorStepWindowRecorder.md`](SimulatorStepWindowRecorder.md)。
 
 对只有 `agent_transcript.jsonl` 的标准化环境采集，viewer 仍会显示命令、环境反馈和
 传感器变化，并清楚标记“没有 Codex App Server activity stream”，不会伪造 Agent 活动。

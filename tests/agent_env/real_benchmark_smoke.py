@@ -243,6 +243,12 @@ def main() -> None:
         assert ready["annotations"]["bbox"] is args.provide_bbox
         assert ready["annotations"]["mask"] is args.provide_mask
         assert ready["agent_tools"] == ["start_episode", "step_eef", "finish_episode"]
+        assert ready["sim_step_recorder"]["enabled"] is True
+        assert ready["sim_step_recorder"]["agent_visible"] is False
+        assert ready["sim_step_recorder"]["sample_interval_physics_steps"] == 12
+        assert ready["step_eef_timing"]["post_action_settle_physics_steps"] == 60
+        assert ready["step_eef_timing"]["independent_of_recorder_enablement"] is True
+        assert ready["sim_step_recorder"]["post_action_record_physics_steps"] == 60
         assert [variant["title"] for variant in ready["command_schema"]["oneOf"]] == [
             "start",
             "step",
@@ -300,6 +306,7 @@ def main() -> None:
         outcome = client.result("rollout_finished")
         assert isinstance(outcome["official_task_success"], bool)
         assert outcome["commitment_verified"] is True
+        assert "sim_step_recording" not in outcome
         assert_full_p6_observation(
             run_dir,
             args.task,
@@ -325,8 +332,35 @@ def main() -> None:
         assert saved["pre_move_enabled"] is args.pre_move
         assert saved["start_condition"] == ready["start_condition"]
         assert private_audit.stat().st_mode & 0o777 == 0o600
+        private_payload = json.loads(private_audit.read_text(encoding="utf-8"))
+        step_events = [
+            event
+            for event in private_payload["events"]
+            if event["kind"] == "step_checker"
+        ]
+        assert step_events[0]["simulator_timing"][
+            "post_action_settle_physics_steps_executed"
+        ] == 60
         assert saved["replay_video"].get("codec_name") == "h264", saved["replay_video"]
         assert saved["replay_video"].get("pix_fmt") == "yuv420p"
+        sim_recording = saved["sim_step_recording"]
+        assert sim_recording["error"] is None, sim_recording
+        assert sim_recording["frame_count"] > 0
+        assert sim_recording["video"]["codec_name"] == "h264"
+        assert sim_recording["video"]["pix_fmt"] == "yuv420p"
+        assert (run_dir / sim_recording["video"]["path"]).is_file()
+        recorder_manifest = json.loads(
+            (run_dir / sim_recording["manifest"]["path"]).read_text(encoding="utf-8")
+        )
+        assert recorder_manifest["config"]["agent_visible"] is False
+        assert recorder_manifest["config"]["post_action_record_physics_steps"] == 60
+        assert [segment["kind"] for segment in recorder_manifest["segments"]] == [
+            "step_eef",
+            "finish_settle",
+        ]
+        assert recorder_manifest["segments"][0][
+            "post_action_settle_physics_steps_executed"
+        ] == 60
         print(
             f"REAL_BENCHMARK_SMOKE_OK task={args.task} profile=6 "
             f"start_condition={ready['start_condition']} bbox={args.provide_bbox} "

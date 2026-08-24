@@ -253,6 +253,10 @@ def test_reference_runner_defaults_to_multiturn_and_network_enabled(
     assert defaults.codex_network_access is True
     assert defaults.effort == "high"
     assert defaults.key_initial_relative_yaw_rad is None
+    assert defaults.sim_step_recorder is True
+    assert defaults.sim_step_recorder_fps == pytest.approx(10.0)
+    assert defaults.post_action_settle_steps == 60
+    assert defaults.sim_step_recorder_post_action_steps == 60
 
     monkeypatch.setattr(
         sys,
@@ -286,6 +290,42 @@ def test_reference_runner_defaults_to_multiturn_and_network_enabled(
     assert parse_args().key_initial_relative_yaw_rad == pytest.approx(
         -1.5707963267948966
     )
+
+
+def test_recorder_tail_defaults_to_and_cannot_exceed_action_settling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    common = [
+        "run_codex_benchmark.py",
+        "--task",
+        "pull_out_key",
+        "--profile",
+        "1",
+        "--post-action-settle-steps",
+        "24",
+        "--dry-run",
+    ]
+    monkeypatch.setattr(sys, "argv", common)
+    inherited = parse_args()
+    assert inherited.post_action_settle_steps == 24
+    assert inherited.sim_step_recorder_post_action_steps == 24
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [*common[:-1], "--sim-step-recorder-post-action-steps", "12", "--dry-run"],
+    )
+    shorter = parse_args()
+    assert shorter.post_action_settle_steps == 24
+    assert shorter.sim_step_recorder_post_action_steps == 12
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [*common[:-1], "--sim-step-recorder-post-action-steps", "25", "--dry-run"],
+    )
+    with pytest.raises(SystemExit):
+        parse_args()
 
 
 def test_fixed_demo_excludes_its_seed_from_evaluation() -> None:
