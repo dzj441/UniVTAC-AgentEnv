@@ -37,6 +37,7 @@ from agent_env.artifacts import (
     save_composite,
     tensor_to_rgb,
 )
+from agent_env.benchmark_checker import PostGraspReferenceTracker
 from agent_env.benchmark_contract import (
     public_benchmark_command_schema,
     validate_benchmark_command_fields,
@@ -64,6 +65,7 @@ from agent_env.benchmark_tasks import (
     list_benchmark_tasks,
 )
 from agent_env.contract import consume_private_evaluator_seed
+from agent_env.expert_tasks import BASE_TASK_SUCCESS
 from agent_env.nvidia_runtime import audit_current_process
 from isaaclab.app import AppLauncher
 
@@ -254,6 +256,11 @@ class EmbodiedAgentEnv:
         self._observation_index = 0
         self._rollout_start_time = 0.0
         self._private_events: list[dict[str, Any]] = []
+        self._inhand_reference_tracker = PostGraspReferenceTracker(
+            required=(
+                task_spec.requires_post_grasp_reference and not PRE_MOVE_ENABLED
+            )
+        )
 
     def write_manifest(self) -> None:
         manifest = self.protocol.contract_manifest()
@@ -284,8 +291,11 @@ class EmbodiedAgentEnv:
                 ],
                 "terminal_evaluation": {
                     "physics_settle_steps": FINISH_SETTLE_STEPS,
-                    "put_bottle_requires_release": True,
-                    "put_bottle_requires_stability": True,
+                    "policy": self.task_spec.terminal_policy,
+                    "requires_release": self.task_spec.terminal_policy
+                    == "released_stable_bottle_v1",
+                    "requires_stability": self.task_spec.terminal_policy
+                    == "released_stable_bottle_v1",
                 },
                 "rendering": "official evaluator-compatible livestream=2 experience",
                 "nvidia_userspace": {
@@ -316,6 +326,31 @@ class EmbodiedAgentEnv:
         self._observation_index += 1
         return value
 
+    def _update_post_grasp_reference(
+        self,
+        *,
+        delta_position: np.ndarray,
+        delta_rpy: np.ndarray,
+        delta_gripper: float,
+        execution_succeeded: bool,
+    ) -> None:
+        arm_changed = bool(np.any(delta_position != 0) or np.any(delta_rpy != 0))
+        phase = self._inhand_reference_tracker.after_action(
+            arm_changed=arm_changed,
+            delta_gripper=delta_gripper,
+            execution_succeeded=execution_succeeded,
+        )
+        if phase == "captured_after_gripper_close":
+            self.task.initialize_replay_task_phase()
+        if phase is not None:
+            self._record_private(
+                "post_grasp_checker_reference",
+                {
+                    "phase": phase,
+                    "prior_observation_id": self.protocol.current_observation_id,
+                },
+            )
+
     def _camera_info_for_instance(self, camera: Any) -> Any:
         info: Any = camera.data.info
         if isinstance(info, list):
@@ -344,6 +379,11 @@ class EmbodiedAgentEnv:
         robot = self.task._robot_manager.robot
         robot_position = to_numpy(robot.data.root_link_pos_w[0])
         robot_quaternion = to_numpy(robot.data.root_link_quat_w[0])
+        annotation_prim_names = (
+            self.task_spec.annotation_prim_names(self.task)
+            if initial_observation and self.annotations.enabled_features
+            else {}
+        )
 
         for camera_name in self.profile.camera_names:
             camera_key = f"{camera_name}_rgb"
@@ -402,11 +442,10 @@ class EmbodiedAgentEnv:
                     "raw_id_to_labels": {str(key): value for key, value in mapping.items()},
                     "roles": {},
                 }
-                for role, private_name in (
-                    ("manipulated_object", self.task_spec.manipulated_prim_name),
-                    ("goal_fixture", self.task_spec.goal_prim_name),
-                ):
-                    mask, selected_ids = instance_role_mask(instance, mapping, private_name)
+                for role, private_names in annotation_prim_names.items():
+                    mask, selected_ids = instance_role_mask(
+                        instance, mapping, private_names
+                    )
                     annotation, annotation_panels = save_annotation_artifacts(
                         obs_dir / "annotations" / camera_name,
                         role=role,
@@ -421,7 +460,7 @@ class EmbodiedAgentEnv:
                         for label, panel in annotation_panels
                     )
                     private_camera["roles"][role] = {
-                        "private_prim_name": private_name,
+                        "private_prim_names": list(private_names),
                         "selected_instance_ids": selected_ids,
                         "area_px": int(mask.sum()),
                     }
@@ -538,6 +577,12 @@ class EmbodiedAgentEnv:
             action, action_type="delta_ee"
         )
         duration = time.perf_counter() - started
+        self._update_post_grasp_reference(
+            delta_position=dp,
+            delta_rpy=dr,
+            delta_gripper=dg,
+            execution_succeeded=bool(execution_succeeded),
+        )
         # Generic benchmark success is terminal-only.  Clear BaseTask's early
         # latching so a pose that is momentarily valid cannot freeze later steps.
         self.task.eval_success = False
@@ -577,9 +622,7 @@ class EmbodiedAgentEnv:
     def finish(self, command: dict[str, Any]) -> dict[str, Any]:
         current_observation_id = command.get("observation_id")
         self.protocol.finish(current_observation_id)
-        manipulated = self.task._actor_manager.actors[
-            self.task_spec.manipulated_prim_name
-        ]
+        manipulated = self.task_spec.manipulated_actor(self.task)
         pose_before = pose_snapshot(manipulated)
         self.task.eval_success = False
         self.task.plan_success = True
@@ -612,7 +655,10 @@ class EmbodiedAgentEnv:
                 }
             )
             official_success = bool(base_success and released and stable)
-        elif self.task_spec.terminal_policy != "pull_out_key_v1":
+        elif self.task_spec.terminal_policy not in {
+            BASE_TASK_SUCCESS,
+            "pull_out_key_v1",
+        }:
             raise RuntimeError(f"Unknown terminal policy {self.task_spec.terminal_policy!r}")
 
         final_observation_id = self._next_observation_id()

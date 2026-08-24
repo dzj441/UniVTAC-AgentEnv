@@ -93,8 +93,14 @@ def test_annotation_switches_are_independently_composable(
     assert manifest["raw_labels"] is False
 
 
-def test_only_two_new_tasks_are_registered() -> None:
+def test_all_eight_tasks_are_registered() -> None:
     assert [task.name for task in list_benchmark_tasks()] == [
+        "grasp_classify",
+        "insert_HDMI",
+        "insert_hole",
+        "insert_tube",
+        "lift_bottle",
+        "lift_can",
         "pull_out_key",
         "put_bottle_in_shelf",
     ]
@@ -857,6 +863,22 @@ def test_native_depth_and_anonymous_annotation_artifacts(tmp_path: Path) -> None
     mask, ids = instance_role_mask(instance, mapping, "key")
     assert ids == [4]
     assert bbox_xyxy_exclusive(mask) == [0, 0, 2, 2]
+    candidate_mapping = normalize_instance_mapping(
+        {
+            "idToLabels": {
+                "4": "/World/envs/env_0/green_pad/mesh",
+                "7": "/World/envs/env_0/orange_pad/mesh",
+            }
+        }
+    )
+    candidate_instance = np.asarray([[4, 0], [0, 7]], dtype=np.int32)
+    candidate_mask, candidate_ids = instance_role_mask(
+        candidate_instance,
+        candidate_mapping,
+        ("green_pad", "orange_pad"),
+    )
+    assert candidate_ids == [4, 7]
+    assert candidate_mask.tolist() == [[True, False], [False, True]]
     public, panels = save_annotation_artifacts(
         tmp_path / "annotation",
         role="manipulated_object",

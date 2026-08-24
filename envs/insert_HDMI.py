@@ -78,8 +78,7 @@ class Task(BaseTask):
         self.move(self.atom.close_gripper())
         self.move(self.atom.move_by_displacement(z=0.02))
 
-        self.target_pose = self.slot.get_pose().add_bias([0.0, 0.0, 0.005])
-        self.hole_pose = self.slot.get_pose().add_bias([0.0, 0.0, 0.0128])
+        self.initialize_task_references()
         noise = self.create_noise([0.005, 0.005, 0.0])
         self.noise_pose = self.hole_pose.add_offset(noise)
         self.move(self.atom.place_actor(
@@ -89,6 +88,10 @@ class Task(BaseTask):
             dis=0.01,
             is_open=False
         ))
+
+    def initialize_task_references(self):
+        self.target_pose = self.slot.get_pose().add_bias([0.0, 0.0, 0.005])
+        self.hole_pose = self.slot.get_pose().add_bias([0.0, 0.0, 0.0128])
 
     def _play_once(self):
         self.move(self.atom.place_actor(

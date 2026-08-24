@@ -9,7 +9,8 @@ v1 是当前通用 benchmark 接口。它把“Agent 能看到什么”与“Age
 - 控制过程中不返回 reward 或 task success；
 - `finish_episode` 后才执行终局评测并公开 success。
 
-旧的 `grasp_classify` 三 level 接口保留为 v0 兼容路径，但不是 v1 主榜定义。
+旧的 `grasp_classify` 三 level 协议保留为 v0 兼容路径；同名任务也已作为标准
+`start_episode/step_eef/finish_episode` 任务接入 v1。
 
 ## 六个 Observation Profile
 
@@ -62,6 +63,10 @@ PNG。物体不在首帧视野时会返回 `visible=false`、空 BBox/Mask，而
 Isaac 的 raw instance ID、label、actor 名和 USD prim path 只在 host 内存中用于映射，
 终局前不会写入公开记录。SAM 3/UniDepth V2 不参与该 oracle 轴。
 
+`grasp_classify` 的正确目标垫取决于隐藏类别，因此它的 `goal_fixture` 是绿、橙两个候选垫
+的联合 Mask/BBox，不会只标出正确目标而泄露分类答案。其他任务的 `goal_fixture` 对应单个
+目标结构。
+
 ## 固定专家 ICL 诊断轴
 
 `--icl none` 不创建、不提示任何专家资产。`--icl fixed_demo` 则在 Agent 启动前，把当前
@@ -82,6 +87,12 @@ Isaac 的 raw instance ID、label、actor 名和 USD prim path 只在 host 内�
 
 | Task | 指令 | 初始状态 | 终局策略 |
 |---|---|---|---|
+| `grasp_classify` | Grasp the center prism, determine whether it is rough or plain from the available observations, and place a rough prism on the orange pad or a plain prism on the green pad. | home pose，prism 未抓取 | 原任务类别条件目标 checker |
+| `insert_HDMI` | Grasp the HDMI connector and insert it fully into the port. | home pose，connector 未抓取 | 原任务 checker |
+| `insert_hole` | Grasp the peg and insert it fully into the angled hole. | home pose，peg 未抓取 | 原任务 checker；Agent close-gripper 后冻结 evaluator-private in-hand reference |
+| `insert_tube` | Grasp the tube and insert it fully into the fixture. | home pose，tube 未抓取 | 原任务 checker；Agent close-gripper 后冻结 evaluator-private in-hand reference |
+| `lift_bottle` | Grasp the bottle, rotate it upright beside the wall, and release it stably. | home pose，bottle 未抓取 | 原任务 checker |
+| `lift_can` | Grasp the horizontal can, rotate it upright on the table, and release it. | home pose，can 未抓取 | 原任务 checker |
 | `pull_out_key` | Grasp the key and pull it completely out of the slot. | 默认机器人 home pose，key 未抓取；key 相对 slot 的初始 yaw 恢复原始 `Uniform(-π/2, -π/4)` 分布 | 使用原任务 checker；拔出阈值仍需后续视频校准 |
 | `put_bottle_in_shelf` | Pick up the bottle from the table, place it upright inside the shelf, and release it. | 默认机器人 home pose，bottle 未抓取 | 原位置/姿态 checker + 已松爪 + 60 physics steps 后稳定 |
 
@@ -90,6 +101,13 @@ v1 默认关闭 task-specific `pre_move()`，因此 Agent 必须自行定位、�
 `pre_move()`，并在 manifest 中记为 `start_condition=pregrasped`。默认模式记为
 `start_condition=ungrasped`。跳过 `pre_move()` 时只建立旧 checker 必需的 host-private
 参考状态，不移动机器人或物体。
+
+`insert_hole` 与 `insert_tube` 的上游 checker 把 pre-move 抓取后的物体—夹爪相对位姿用作
+防滑参考。v1 ungrasped 路径在 Agent 实际 close-gripper 周期结束、开始搬运时建立并冻结同一
+类 evaluator-private 参考；否则 reset 时的未抓取相对位姿会令正常完成也无法通过 checker。
+这项兼容层并非原六任务接入需求的一部分，当前仍属于尚待物理校准的 milestone 行为；其原始
+假设、精确状态机、已知风险、验证证据与回滚边界完整记录在
+[`CheckerLifecycleCompatibility.md`](CheckerLifecycleCompatibility.md)。
 
 Key 的相对初始 yaw 可通过 `--key-initial-relative-yaw-rad RADIANS` 固定；例如诊断用的
 垂直条件传入 `-1.5707963267948966`。省略该参数时始终使用上述原始随机分布，所选模式与

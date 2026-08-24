@@ -17,7 +17,9 @@ from agent_env.benchmark_observations import (
 from agent_env.benchmark_profiles import get_observation_profile
 from agent_env.p6_expert_master import (
     P6ExpertMasterError,
+    build_p6_collection_candidate_manifest,
     build_p6_master_manifest,
+    configure_p6_capture_cfg,
     validate_fixed_expert_source,
     validate_gelsight_wrist_depth_surface_policy,
 )
@@ -105,6 +107,36 @@ def test_p6_capture_rechecks_composed_gelsight_visibility_values() -> None:
 
     with pytest.raises(P6ExpertMasterError, match="violates"):
         validate_gelsight_wrist_depth_surface_policy(task)
+
+
+def test_configure_p6_capture_cfg_uses_one_canonical_sensor_contract() -> None:
+    cameras = [
+        SimpleNamespace(name="head"),
+        SimpleNamespace(name="wrist"),
+    ]
+    cfg = SimpleNamespace(
+        reset_time_limit=120.0,
+        obs_data_type={"actor": True},
+        cameras=cameras,
+        random_texture=True,
+    )
+    configure_p6_capture_cfg(cfg)
+
+    assert cfg.reset_time_limit == 900.0
+    assert cfg.obs_data_type == {
+        "camera": ["rgb", "depth"],
+        "tactile": ["rgb_marker"],
+        "embodiment": ["joint", "ee"],
+    }
+    assert cfg.random_texture is False
+    for camera in cameras:
+        assert camera.data_types == [
+            "rgb",
+            "depth",
+            "instance_id_segmentation_fast",
+        ]
+        assert camera.update_latest_camera_pose is True
+        assert camera.colorize_instance_id_segmentation is False
 
 
 def write_source(path: Path) -> None:
@@ -270,6 +302,33 @@ def test_p6_master_freezes_complete_observation_waypoints(tmp_path: Path) -> Non
     assert (
         manifest["capture"]["annotations"]["schedule"]
         == "initial_observation_only"
+    )
+
+
+def test_collection_candidate_retains_p6_without_claiming_replay(tmp_path: Path) -> None:
+    inputs = master_fixture(tmp_path)
+    manifest = build_p6_collection_candidate_manifest(
+        task=str(inputs["task"]),
+        seed=int(inputs["seed"]),
+        source_hdf5=Path(inputs["source_hdf5"]),
+        collection_video=Path(inputs["replay_video"]),
+        candidate_root=tmp_path,
+        waypoint_records=list(inputs["waypoint_records"]),
+    )
+
+    assert manifest["schema_version"] == (
+        "univtac.fixed_expert_p6_collection_candidate.v1"
+    )
+    assert manifest["agent_ready"] is False
+    assert manifest["replay_verified"] is False
+    assert manifest["verification"] == {
+        "collection_checker_success": True,
+        "independent_replay_required": True,
+        "official_task_success": None,
+    }
+    assert manifest["capture"]["captured_observation_count"] == 2
+    assert manifest["capture"]["annotations"]["schedule"] == (
+        "initial_observation_only"
     )
 
 

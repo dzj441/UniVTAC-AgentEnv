@@ -6,6 +6,8 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
+from .expert_tasks import BASE_TASK_SUCCESS, get_expert_task
+
 
 LEGACY_KEY_INITIAL_RELATIVE_YAW_RANGE_RAD = (-math.pi / 2, -math.pi / 4)
 
@@ -16,8 +18,6 @@ class BenchmarkTaskSpec:
     module: str
     ungrasped_instruction: str
     pregrasped_instruction: str
-    manipulated_prim_name: str
-    goal_prim_name: str
     terminal_policy: str
 
     @property
@@ -32,6 +32,16 @@ class BenchmarkTaskSpec:
 
     def instruction_for(self, *, pre_move: bool) -> str:
         return self.pregrasped_instruction if pre_move else self.ungrasped_instruction
+
+    def manipulated_actor(self, task: Any) -> Any:
+        return get_expert_task(self.name).manipulated_actor(task)
+
+    def annotation_prim_names(self, task: Any) -> dict[str, tuple[str, ...]]:
+        return get_expert_task(self.name).annotation_prim_names(task)
+
+    @property
+    def requires_post_grasp_reference(self) -> bool:
+        return get_expert_task(self.name).requires_post_grasp_reference
 
     def to_manifest(self, *, pre_move: bool = False) -> dict[str, Any]:
         return {
@@ -53,13 +63,78 @@ class BenchmarkTaskSpec:
 
 
 _TASKS = {
+    "grasp_classify": BenchmarkTaskSpec(
+        name="grasp_classify",
+        module="envs.grasp_classify",
+        ungrasped_instruction=(
+            "Grasp the center prism, determine whether it is rough or plain from "
+            "the available observations, and place a rough prism on the orange pad "
+            "or a plain prism on the green pad."
+        ),
+        pregrasped_instruction=(
+            "Determine whether the already-grasped prism is rough or plain from the "
+            "available observations, then place a rough prism on the orange pad or "
+            "a plain prism on the green pad."
+        ),
+        terminal_policy=BASE_TASK_SUCCESS,
+    ),
+    "insert_HDMI": BenchmarkTaskSpec(
+        name="insert_HDMI",
+        module="envs.insert_HDMI",
+        ungrasped_instruction=(
+            "Grasp the HDMI connector and insert it fully into the port."
+        ),
+        pregrasped_instruction=(
+            "Insert the already-grasped HDMI connector fully into the port."
+        ),
+        terminal_policy=BASE_TASK_SUCCESS,
+    ),
+    "insert_hole": BenchmarkTaskSpec(
+        name="insert_hole",
+        module="envs.insert_hole",
+        ungrasped_instruction="Grasp the peg and insert it fully into the angled hole.",
+        pregrasped_instruction=(
+            "Insert the already-grasped peg fully into the angled hole."
+        ),
+        terminal_policy=BASE_TASK_SUCCESS,
+    ),
+    "insert_tube": BenchmarkTaskSpec(
+        name="insert_tube",
+        module="envs.insert_tube",
+        ungrasped_instruction="Grasp the tube and insert it fully into the fixture.",
+        pregrasped_instruction=(
+            "Insert the already-grasped tube fully into the fixture."
+        ),
+        terminal_policy=BASE_TASK_SUCCESS,
+    ),
+    "lift_bottle": BenchmarkTaskSpec(
+        name="lift_bottle",
+        module="envs.lift_bottle",
+        ungrasped_instruction=(
+            "Grasp the bottle, rotate it upright beside the wall, and release it stably."
+        ),
+        pregrasped_instruction=(
+            "Rotate the already-grasped bottle upright beside the wall and release it "
+            "stably."
+        ),
+        terminal_policy=BASE_TASK_SUCCESS,
+    ),
+    "lift_can": BenchmarkTaskSpec(
+        name="lift_can",
+        module="envs.lift_can",
+        ungrasped_instruction=(
+            "Grasp the horizontal can, rotate it upright on the table, and release it."
+        ),
+        pregrasped_instruction=(
+            "Rotate the already-grasped can upright on the table and release it."
+        ),
+        terminal_policy=BASE_TASK_SUCCESS,
+    ),
     "pull_out_key": BenchmarkTaskSpec(
         name="pull_out_key",
         module="envs.pull_out_key",
         ungrasped_instruction="Grasp the key and pull it completely out of the slot.",
         pregrasped_instruction="Pull the already-grasped key completely out of the slot.",
-        manipulated_prim_name="key",
-        goal_prim_name="slot",
         terminal_policy="pull_out_key_v1",
     ),
     "put_bottle_in_shelf": BenchmarkTaskSpec(
@@ -72,10 +147,6 @@ _TASKS = {
         pregrasped_instruction=(
             "Place the already-grasped bottle upright inside the shelf and release it."
         ),
-        # The task currently registers BottleLift.usd under the actor name
-        # ``prism``.  That private implementation name is never serialized.
-        manipulated_prim_name="prism",
-        goal_prim_name="shelf",
         terminal_policy="released_stable_bottle_v1",
     ),
 }

@@ -34,6 +34,8 @@ All available `task_name` options correspond to Python modules in the `envs/` di
 | `episode_num` | `int` | `100` | Number of successful episodes to collect. |
 | `sensor_type` | `str` | `gsmini` | Tactile sensor type: `gsmini`, `gf225`, or `xensews`. |
 | `observations` | `dict` | — | Which observation modalities to record (see below). |
+| `record_pre_move` | `bool` | `false` | Include the initial ungrasped frame and scripted setup/grasp phase. |
+| `capture_p6_observations` | `bool` | `false` | Save a sidecar P6 stream with complete depth/calibration and initial-only bbox/mask. |
 
 ## Data Structure
 
@@ -43,6 +45,24 @@ After data collection is completed, the collected data will be stored under `dat
 - Visualization videos of each episode (combining camera and tactile views) can be found in the `video/` directory.
 - Per-episode metadata (step counts, timing, success/failure results) is stored in `metadata.json`.
 - The `suc_map.txt` and `scene/` directory are auxiliary outputs generated during the data collection process.
+
+When `capture_p6_observations` is enabled, each successful episode also has:
+
+```text
+p6_collection_candidates/SEED/
+├── p6_collection_candidate_manifest.json
+└── p6_observations/
+    ├── demo_obs_000/
+    └── ...
+```
+
+This sidecar uses the same maximal observation schema as replay: head/wrist
+RGB and metric depth, tactile marker RGB, robot state, camera intrinsics and
+dynamic extrinsics, plus bbox/mask on `demo_obs_000` only. It is deliberately
+marked `agent_ready=false` and `replay_verified=false`. A collector-side
+checker pass is not sufficient to publish an ICL asset; the independent replay
+and freeze procedure in
+[FixedExpertTrajectories.md](FixedExpertTrajectories.md) remains mandatory.
 
 Below is the structure of the saved observation data for each episode (stored in HDF5 format). `HDF5Handler` in `envs/utils/data.py` can be used to read and write this data format:
 

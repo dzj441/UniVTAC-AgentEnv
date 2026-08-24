@@ -59,15 +59,7 @@ class Task(BaseTask):
         self.origin_inhand_pose = self.prism.get_pose().rebase(
             self._robot_manager.get_gripper_center_pose())
 
-        base_pose = self.slot.get_pose()
-        base_pose[3:] = (1, 0, 0, 0)
-        self.metadata['rotate'] = self.rotate
-
-        self.hole_pose = base_pose.add_bias([0.0, 0, 0.1])
-        if self.rotate == 0:
-            self.target_pose = self.hole_pose.add_rotation([0, -np.pi/6, 0])
-        else:
-            self.target_pose = self.hole_pose.add_rotation([0, np.pi/6, 0])
+        self.initialize_task_references()
         try_pose = self.hole_pose
 
         self.move(self.atom.move_by_displacement(z=0.15), constraint_pose=[1, 1, 1, 1, 1, 0])
@@ -84,6 +76,22 @@ class Task(BaseTask):
             is_open=False
         ), constraint_pose=[1, 1, 1, 1, 1, 0])
 
+        self.origin_inhand_pose = self.prism.get_pose().rebase(
+            self._robot_manager.get_gripper_center_pose())
+
+    def initialize_task_references(self):
+        base_pose = self.slot.get_pose()
+        base_pose[3:] = (1, 0, 0, 0)
+        self.metadata['rotate'] = self.rotate
+        self.hole_pose = base_pose.add_bias([0.0, 0, 0.1])
+        if self.rotate == 0:
+            self.target_pose = self.hole_pose.add_rotation([0, -np.pi/6, 0])
+        else:
+            self.target_pose = self.hole_pose.add_rotation([0, np.pi/6, 0])
+        self.origin_inhand_pose = self.prism.get_pose().rebase(
+            self._robot_manager.get_gripper_center_pose())
+
+    def initialize_replay_task_phase(self):
         self.origin_inhand_pose = self.prism.get_pose().rebase(
             self._robot_manager.get_gripper_center_pose())
 

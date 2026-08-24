@@ -53,6 +53,9 @@ class Task(BaseTask):
             is_close=False,
             pre_dis=0.5
         ))
+        self.initialize_task_references()
+
+    def initialize_task_references(self):
         self.target_pose = self.wall.get_pose().add_bias([-0.08, 0, 0])
         
     def _play_once(self):

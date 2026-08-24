@@ -13,7 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from agent_env.benchmark_tasks import get_benchmark_task  # noqa: E402
+from agent_env.expert_tasks import get_expert_task  # noqa: E402
 from agent_env.expert_trajectory import build_fixed_expert_manifest  # noqa: E402
 
 
@@ -32,7 +32,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    task = get_benchmark_task(args.task)
+    task = get_expert_task(args.task)
     manifest = build_fixed_expert_manifest(
         task=task.name,
         seed=args.seed,

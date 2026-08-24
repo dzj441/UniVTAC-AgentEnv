@@ -20,8 +20,14 @@ from PIL import Image
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from agent_env.benchmark_tasks import list_benchmark_tasks
+
+
 RESULT_PREFIX = "AGENT_ENV_RESULT "
-TASKS = ("pull_out_key", "put_bottle_in_shelf")
+TASKS = tuple(task.name for task in list_benchmark_tasks())
 
 
 def parse_args() -> argparse.Namespace:

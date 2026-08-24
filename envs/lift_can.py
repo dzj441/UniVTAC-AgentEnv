@@ -58,6 +58,12 @@ class Task(BaseTask):
         )
         self.move(self.atom.grasp_actor(self.can, contact_point_id=grasp_idx, is_close=False))
         self.origin_inhand_pose = self._robot_manager.get_inhand_pose(self.can)
+
+    def initialize_task_references(self):
+        self.origin_inhand_pose = self._robot_manager.get_inhand_pose(self.can)
+
+    def initialize_replay_task_phase(self):
+        self.origin_inhand_pose = self._robot_manager.get_inhand_pose(self.can)
         
     def _play_once(self):
         self.move(self.atom.close_gripper())

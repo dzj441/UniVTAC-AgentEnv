@@ -19,10 +19,29 @@ from agent_env.fixed_demo_bundle import (
     FixedDemoAssetSpec,
     FixedDemoBundleError,
     contact_sheet_indices,
+    get_fixed_demo_asset_spec,
     project_fixed_demo_bundle,
     validate_fixed_demo_bundle,
 )
 from agent_env.p6_expert_master import build_p6_master_manifest
+
+
+@pytest.mark.parametrize(
+    "task",
+    [
+        "grasp_classify",
+        "insert_HDMI",
+        "insert_hole",
+        "insert_tube",
+        "lift_bottle",
+        "lift_can",
+    ],
+)
+def test_six_promoted_tasks_have_seed_zero_fixed_demo_assets(task: str) -> None:
+    spec = get_fixed_demo_asset_spec(task)
+    assert spec.task == task
+    assert spec.seed == 0
+    assert len(spec.manifest_sha256) == 64
 
 
 def _write_source(path: Path) -> None:

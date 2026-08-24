@@ -125,9 +125,11 @@ import importlib
 from typing import TYPE_CHECKING
 from envs.utils.data import HDF5Handler
 from agent_env.expert_trajectory import inspect_expert_hdf5
+from agent_env.expert_tasks import get_expert_task
 from agent_env.p6_expert_master import (
     build_p6_master_manifest,
     capture_p6_observation,
+    configure_p6_capture_cfg,
     validate_fixed_expert_source,
 )
 if TYPE_CHECKING:
@@ -182,14 +184,14 @@ def _pose_drift(before, after):
     return translation, rotation
 
 
-def _terminal_checks(task, pose_before, pose_after):
+def _terminal_checks(task, task_spec, pose_before, pose_after):
     base_success = bool(task.check_success())
     checks = {
         'base_task_success': base_success,
         'settle_steps': int(args_cli.settle_steps),
     }
     official_success = base_success
-    if hasattr(task, 'bottle'):
+    if task_spec.requires_release_stability:
         translation_drift, rotation_drift = _pose_drift(pose_before, pose_after)
         gripper_qpos = float(task._robot_manager.get_gripper_qpos())
         released = gripper_qpos >= 0.0175
@@ -219,6 +221,7 @@ def replay(task: 'BaseTask', seed, data_path:Path):
         # for a complete ungrasped expert demonstration.
         source_trajectory = inspect_expert_hdf5(data_path)
     task_name = task.__class__.__module__.rsplit('.', 1)[-1]
+    task_spec = get_expert_task(task_name)
     p6_source = None
     if args_cli.capture_p6_master:
         p6_source = validate_fixed_expert_source(
@@ -244,6 +247,12 @@ def replay(task: 'BaseTask', seed, data_path:Path):
     physics_action_count = 0
     p6_waypoints = []
     previous_idx = None
+    replay_task_phase_initialized = False
+    task_phase_start_frame = (
+        source_trajectory['task_phase_start_frame']
+        if source_trajectory is not None
+        else None
+    )
     for idx in applied_indices:
         action = qpos_list[idx]
         if args_cli.trajectory_includes_pre_move and previous_idx is not None:
@@ -267,6 +276,13 @@ def replay(task: 'BaseTask', seed, data_path:Path):
             )
             physics_action_count += 1
             execution_succeeded = bool(execution_succeeded and exec_succ)
+        if (
+            task_phase_start_frame is not None
+            and not replay_task_phase_initialized
+            and idx >= task_phase_start_frame
+        ):
+            task.initialize_replay_task_phase()
+            replay_task_phase_initialized = True
         observation = task._get_observations()
         arm_dis = torch.abs(action[:7] - observation['embodiment']['joint'][:7])
         gripper_dis = torch.abs(action[7] - observation['embodiment']['joint'][7:])
@@ -307,13 +323,13 @@ def replay(task: 'BaseTask', seed, data_path:Path):
             })
         previous_idx = idx
 
-    manipulated_actor = task.bottle if hasattr(task, 'bottle') else task.key
+    manipulated_actor = task_spec.manipulated_actor(task)
     pose_before = _pose_snapshot(manipulated_actor)
     task.eval_success = False
     task.delay(steps=args_cli.settle_steps, is_save=True, force=True)
     pose_after = _pose_snapshot(manipulated_actor)
     official_success, evaluator_checks = _terminal_checks(
-        task, pose_before, pose_after
+        task, task_spec, pose_before, pose_after
     )
 
     seed_root = task.save_root / 'replay_traj'
@@ -346,6 +362,7 @@ def replay(task: 'BaseTask', seed, data_path:Path):
         'execution_succeeded': execution_succeeded,
         'official_task_success': official_success,
         'evaluator_checks': evaluator_checks,
+        'terminal_policy': task_spec.terminal_policy,
         'pose_before_settle': pose_before,
         'pose_after_settle': pose_after,
         'replay_video': str(video_path.resolve()),
@@ -442,25 +459,7 @@ def main():
     if args_cli.trajectory_includes_pre_move:
         env_cfg.step_lim = max(env_cfg.step_lim, 5000)
     if args_cli.capture_p6_master:
-        # The first high-fidelity TacEx reset compiles renderer/solver state and
-        # can legitimately exceed the historical RGB-only 120-second limit.
-        env_cfg.reset_time_limit = max(float(env_cfg.reset_time_limit), 900.0)
-        env_cfg.obs_data_type = {
-            'camera': ['rgb', 'depth'],
-            'tactile': ['rgb_marker'],
-            'embodiment': ['joint', 'ee'],
-        }
-        if {camera.name for camera in env_cfg.cameras} != {'head', 'wrist'}:
-            raise RuntimeError('P6 capture requires exactly head and wrist cameras')
-        for camera in env_cfg.cameras:
-            camera.data_types = [
-                'rgb',
-                'depth',
-                'instance_id_segmentation_fast',
-            ]
-            camera.update_latest_camera_pose = True
-            camera.colorize_instance_id_segmentation = False
-        env_cfg.random_texture = False
+        configure_p6_capture_cfg(env_cfg)
 
     env_cfg.scene.num_envs = 1
     env_cfg.sim.device = args_cli.device if args_cli.device is not None \

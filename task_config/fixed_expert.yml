@@ -13,6 +13,7 @@ sensor_type: gsmini
 # Preserve the initial ungrasped snapshot and all saved planner states from
 # pre_move before continuing through the normal task demonstration.
 record_pre_move: true
+capture_p6_observations: true
 max_save_frames: 2500
 
 observations:

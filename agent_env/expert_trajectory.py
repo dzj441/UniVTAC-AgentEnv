@@ -13,6 +13,7 @@ import h5py
 import numpy as np
 
 from .artifacts import file_sha256
+from .expert_tasks import get_expert_task
 
 
 class ExpertTrajectoryError(ValueError):
@@ -206,7 +207,7 @@ def build_fixed_expert_manifest(
         raise ExpertTrajectoryError("Replay did not pass the task's base checker")
     if evaluator_checks.get("settle_steps", 0) < 60:
         raise ExpertTrajectoryError("Replay stability window was shorter than 60 steps")
-    if task == "put_bottle_in_shelf":
+    if get_expert_task(task).requires_release_stability:
         if evaluator_checks.get("released") is not True:
             raise ExpertTrajectoryError("Bottle replay did not verify gripper release")
         if evaluator_checks.get("stable_after_release") is not True:

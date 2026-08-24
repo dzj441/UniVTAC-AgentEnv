@@ -34,7 +34,7 @@ from .benchmark_observations import (
     to_numpy,
 )
 from .benchmark_profiles import get_observation_profile
-from .benchmark_tasks import get_benchmark_task
+from .expert_tasks import get_expert_task
 
 
 P6_PROFILE = get_observation_profile(6)
@@ -42,6 +42,9 @@ P6_MODALITIES = frozenset(P6_PROFILE.public_modalities)
 P6_ROBOT_STATE = frozenset(P6_PROFILE.public_robot_state)
 INSTANCE_DATA_TYPE = "instance_id_segmentation_fast"
 P6_MASTER_SCHEMA_VERSION = "univtac.fixed_expert_p6_master.v3"
+P6_COLLECTION_CANDIDATE_SCHEMA_VERSION = (
+    "univtac.fixed_expert_p6_collection_candidate.v1"
+)
 WRIST_METRIC_DEPTH_SURFACE_POLICY = {
     "schema_version": "univtac.wrist_metric_depth_surface_policy.v1",
     "rigid_gripper_and_gelsight_housing_included": True,
@@ -51,6 +54,27 @@ WRIST_METRIC_DEPTH_SURFACE_POLICY = {
 
 class P6ExpertMasterError(ValueError):
     pass
+
+
+def configure_p6_capture_cfg(cfg: Any) -> Any:
+    """Configure one task for the canonical maximal expert observation stream."""
+
+    cfg.reset_time_limit = max(float(cfg.reset_time_limit), 900.0)
+    cfg.obs_data_type = {
+        "camera": ["rgb", "depth"],
+        "tactile": ["rgb_marker"],
+        "embodiment": ["joint", "ee"],
+    }
+    if {camera.name for camera in cfg.cameras} != {"head", "wrist"}:
+        raise P6ExpertMasterError(
+            "P6 capture requires exactly head and wrist cameras"
+        )
+    for camera in cfg.cameras:
+        camera.data_types = ["rgb", "depth", INSTANCE_DATA_TYPE]
+        camera.update_latest_camera_pose = True
+        camera.colorize_instance_id_segmentation = False
+    cfg.random_texture = False
+    return cfg
 
 
 def validate_gelsight_wrist_depth_surface_policy(task: Any) -> None:
@@ -186,11 +210,12 @@ def capture_p6_observation(
     observation_id: str,
     observation_root: Path,
     initial_observation: bool,
+    raw_observation: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Serialize one actual simulator waypoint with the public P6 schema."""
 
     validate_gelsight_wrist_depth_surface_policy(task)
-    raw = task._get_observations()
+    raw = task._get_observations() if raw_observation is None else raw_observation
     if raw.get("actor"):
         raise P6ExpertMasterError("P6 master capture must not request actor observations")
     obs_dir = observation_root.resolve() / observation_id
@@ -198,7 +223,7 @@ def capture_p6_observation(
     calibration: dict[str, Any] = {}
     public_annotations: dict[str, Any] = {}
     panels: list[tuple[str, np.ndarray]] = []
-    task_spec = get_benchmark_task(task_name)
+    task_spec = get_expert_task(task_name)
 
     robot = task._robot_manager.robot
     robot_position = to_numpy(robot.data.root_link_pos_w[0])
@@ -261,10 +286,7 @@ def capture_p6_observation(
                     f"{camera_name} instance metadata is unavailable"
                 )
             camera_annotations: dict[str, Any] = {}
-            for role, private_name in (
-                ("manipulated_object", task_spec.manipulated_prim_name),
-                ("goal_fixture", task_spec.goal_prim_name),
-            ):
+            for role, private_name in task_spec.annotation_prim_names(task).items():
                 mask, _ = instance_role_mask(instance, mapping, private_name)
                 annotation, annotation_panels = save_annotation_artifacts(
                     obs_dir / "annotations" / camera_name,
@@ -332,6 +354,131 @@ def capture_p6_observation(
         observation["annotations"] = public_annotations
     _write_json(obs_dir / "observation.json", observation)
     return observation, tactile_health
+
+
+def build_p6_collection_candidate_manifest(
+    *,
+    task: str,
+    seed: int,
+    source_hdf5: Path,
+    collection_video: Path,
+    candidate_root: Path,
+    waypoint_records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Validate a collector-side P6 capture without claiming replay success."""
+
+    get_expert_task(task)
+    source_hdf5 = source_hdf5.resolve()
+    collection_video = collection_video.resolve()
+    candidate_root = candidate_root.resolve()
+    if not source_hdf5.is_file():
+        raise P6ExpertMasterError(
+            f"P6 collection source HDF5 is missing: {source_hdf5}"
+        )
+    if not collection_video.is_file():
+        raise P6ExpertMasterError(
+            f"P6 collection video is missing: {collection_video}"
+        )
+    with h5py.File(source_hdf5, "r") as handle:
+        source_steps = np.asarray(handle["step"][()]).reshape(-1)
+    if len(waypoint_records) != len(source_steps):
+        raise P6ExpertMasterError(
+            "P6 collection candidate did not capture every source frame"
+        )
+
+    frozen_waypoints: list[dict[str, Any]] = []
+    for index, (record, source_step) in enumerate(zip(waypoint_records, source_steps)):
+        if record.get("source_frame_index") != index:
+            raise P6ExpertMasterError(
+                "P6 collection waypoint indices are not contiguous"
+            )
+        if record.get("source_sim_step") != int(source_step):
+            raise P6ExpertMasterError(
+                "P6 collection waypoint timestamps do not match the HDF5"
+            )
+        observation_file_value = record.get("observation_file")
+        if not isinstance(observation_file_value, str):
+            raise P6ExpertMasterError(
+                "P6 collection waypoint omitted its observation file"
+            )
+        observation_file = Path(observation_file_value).resolve()
+        if (
+            not observation_file.is_relative_to(candidate_root)
+            or not observation_file.is_file()
+        ):
+            raise P6ExpertMasterError(
+                "P6 collection waypoint escaped its candidate directory"
+            )
+        observation = _read_json(observation_file, "P6 collection observation")
+        expected_id = f"demo_obs_{index:03d}"
+        if observation.get("observation_id") != expected_id:
+            raise P6ExpertMasterError(
+                "P6 collection waypoint observation_id mismatch"
+            )
+        validate_p6_observation(
+            observation,
+            task=task,
+            master_root=candidate_root,
+            initial_observation=index == 0,
+            require_initial_annotations=True,
+        )
+        frozen_waypoints.append(
+            {
+                "index": index,
+                "source_sim_step": int(source_step),
+                "observation_id": expected_id,
+                "observation_file": str(
+                    observation_file.relative_to(candidate_root)
+                ),
+                "sha256": file_sha256(observation_file),
+            }
+        )
+
+    return {
+        "schema_version": P6_COLLECTION_CANDIDATE_SCHEMA_VERSION,
+        "task": task,
+        "seed": int(seed),
+        "trajectory_representation": "successful_expert_observation_waypoints",
+        "actions_present": False,
+        "step_eef_conversion_performed": False,
+        "agent_ready": False,
+        "replay_verified": False,
+        "intended_use": (
+            "collector-side sensor audit; independent replay and freezing required"
+        ),
+        "source": {
+            "trajectory_hdf5": {
+                "path": str(source_hdf5),
+                "sha256": file_sha256(source_hdf5),
+            },
+            "collection_video": {
+                "path": str(collection_video),
+                "sha256": file_sha256(collection_video),
+            },
+        },
+        "capture": {
+            "observation_profile": P6_PROFILE.to_manifest(),
+            "wrist_metric_depth_surface_policy": dict(
+                WRIST_METRIC_DEPTH_SURFACE_POLICY
+            ),
+            "annotations": {
+                "bbox": True,
+                "mask": True,
+                "schedule": "initial_observation_only",
+                "public_roles": ["manipulated_object", "goal_fixture"],
+                "raw_instance_metadata": False,
+            },
+            "source_waypoint_sampling": "all recorded source frames",
+            "source_frame_count": len(source_steps),
+            "captured_observation_count": len(frozen_waypoints),
+            "waypoints": frozen_waypoints,
+        },
+        "verification": {
+            "collection_checker_success": True,
+            "independent_replay_required": True,
+            "official_task_success": None,
+        },
+    }
 
 
 def _finite_vector(value: Any, size: int, label: str) -> np.ndarray:
@@ -570,7 +717,8 @@ def build_p6_master_manifest(
         raise P6ExpertMasterError("P6 replay did not pass the base task checker")
     if evaluator_checks.get("settle_steps", 0) < 60:
         raise P6ExpertMasterError("P6 replay stability window was shorter than 60 steps")
-    if task == "put_bottle_in_shelf" and (
+    task_spec = get_expert_task(task)
+    if task_spec.requires_release_stability and (
         evaluator_checks.get("released") is not True
         or evaluator_checks.get("stable_after_release") is not True
     ):

@@ -41,10 +41,21 @@ env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
   --save-dir "${UNIVTAC_EXPERT_ROOT}/source"
 ```
 
-Replace `pull_out_key` with `put_bottle_in_shelf` for the second fixed source.
+The fixed-expert collection/replay data path supports all eight manipulation
+tasks:
+
+```text
+grasp_classify  insert_HDMI  insert_hole  insert_tube
+lift_bottle     lift_can     pull_out_key put_bottle_in_shelf
+```
+
 The collector searches seeds serially and retains the first checker-successful
-episode.  Source artifacts appear below
-`source/<task>/fixed_expert/{hdf5,video}/`.
+episode. Source artifacts appear below
+`source/<task>/fixed_expert/{hdf5,video}/`. The `fixed_expert` configuration
+also captures
+`source/<task>/fixed_expert/p6_collection_candidates/SEED/`. This is an
+immediate sensor/annotation audit of the successful collection, not the final
+ICL master: its manifest explicitly requires independent replay.
 
 ## Replay from the ungrasped state
 
@@ -105,22 +116,31 @@ begin in the ungrasped state and were replayed without calling privileged
 
 | Task | Seed | Source frames | Replayed physics actions | Frozen manifest |
 | --- | ---: | ---: | ---: | --- |
+| `grasp_classify` | 0 | 15 | 291 | `manifests/grasp_classify_seed_0.json` |
+| `insert_HDMI` | 0 | 25 | 491 | `manifests/insert_HDMI_seed_0.json` |
+| `insert_hole` | 0 | 34 | 671 | `manifests/insert_hole_seed_0.json` |
+| `insert_tube` | 0 | 34 | 671 | `manifests/insert_tube_seed_0.json` |
+| `lift_bottle` | 0 | 39 | 771 | `manifests/lift_bottle_seed_0.json` |
+| `lift_can` | 0 | 26 | 511 | `manifests/lift_can_seed_0.json` |
 | `pull_out_key` | 0 | 28 | 551 | `manifests/pull_out_key_seed_0.json` |
 | `put_bottle_in_shelf` | 1 | 44 | 871 | `manifests/put_bottle_in_shelf_seed_1.json` |
 
 The paths in this table are relative to
 `/inspire/qb-ilm/project/semantic-visual-tokenizer/public/dzj/univtac_fixed_experts_camera_c0e6a64_20260819_staging/`.
-Both replay reports passed the official task checker after 60 settling steps.
-The bottle replay additionally verified gripper release and post-release pose
-stability. Source HDF5 and both source/replay H.264 videos are content-hashed
-by their frozen manifests.
+All eight replay reports passed their official task checker after 60 settling
+steps. The shelf-Bottle replay additionally verified gripper release and
+post-release pose stability. Source HDF5 and source/replay H.264 videos are
+content-hashed by their frozen manifests.
 
 ## Derive the P6 observation master
 
 The frozen source remains the authority for expert motion and its independent
-success proof. It does not contain complete P5/P6 camera observations, so a
-sensor-enhanced replay records one full P6 observation after reaching each
-original source waypoint. The final public-data contract is defined in
+success proof. New fixed-expert collections retain a complete P6 candidate at
+collection time, while historical Key/Bottle HDF5 assets do not. In both cases,
+a sensor-enhanced replay records a fresh full P6 observation after reaching
+each original source waypoint. The replay capture—not the collection
+candidate—is the final master because it is causally tied to the independently
+verified replay. The final public-data contract is defined in
 [`PublicObservationAndICLDataContract.md`](PublicObservationAndICLDataContract.md).
 
 ```bash
@@ -170,16 +190,20 @@ motion and success checks:
 
 | Task | Seed | P6 observations | Replayed physics actions | P6 master manifest |
 | --- | ---: | ---: | ---: | --- |
+| `grasp_classify` | 0 | 15 | 291 | `expert_observation_master/grasp_classify_seed_0_wrist_depth_v4/p6_master_manifest.json` |
+| `insert_HDMI` | 0 | 25 | 491 | `expert_observation_master/insert_HDMI_seed_0_wrist_depth_v3/p6_master_manifest.json` |
+| `insert_hole` | 0 | 34 | 671 | `expert_observation_master/insert_hole_seed_0_wrist_depth_v3/p6_master_manifest.json` |
+| `insert_tube` | 0 | 34 | 671 | `expert_observation_master/insert_tube_seed_0_wrist_depth_v3/p6_master_manifest.json` |
+| `lift_bottle` | 0 | 39 | 771 | `expert_observation_master/lift_bottle_seed_0_wrist_depth_v3/p6_master_manifest.json` |
+| `lift_can` | 0 | 26 | 511 | `expert_observation_master/lift_can_seed_0_wrist_depth_v3/p6_master_manifest.json` |
 | `pull_out_key` | 0 | 28 | 551 | `expert_observation_master/pull_out_key_seed_0_wrist_depth_v3/p6_master_manifest.json` |
 | `put_bottle_in_shelf` | 1 | 44 | 871 | `expert_observation_master/put_bottle_in_shelf_seed_1_wrist_depth_v3/p6_master_manifest.json` |
 
-These paths are relative to the same staging root shown above. Both v3 masters
-contain complete P6 observations at every original saved waypoint and both
-independent annotation sources at the initial waypoint only. The Key and
-Bottle manifest SHA-256 values are respectively
-`ff48c0c2df6e75152960e2a78af30ba79b43aaf82905a04093c816b89918fc44` and
-`3e3af14ab0184a9fbfe20129e8ea765c3563dc8182bd8288f998e4a528919c96`.
-The earlier unsuffixed v2 and `p6_master/` v1 directories remain immutable
+These paths are relative to the same staging root shown above. All registered
+masters contain complete P6 observations at every original saved waypoint and
+both independent annotation sources at the initial waypoint only. Every
+manifest path and SHA-256 is pinned by `agent_env/fixed_demo_bundle.py`; the
+earlier unsuffixed v2 and `p6_master/` v1 directories remain immutable
 migration/regression evidence and are not selected by the registry.
 
 ## Export Agent-visible fixed demonstrations
@@ -214,9 +238,8 @@ Validate every registered public projection:
   --fixed-demo-root "${FIXED_DEMO_ROOT}" --summary-only
 ```
 
-The formal matrix contains 48 combinations: two tasks, six observation
-Profiles, and four bbox/mask conditions. The current two registered masters
-pass all 48 projections.
+The full registered matrix contains 192 combinations: eight tasks, six
+observation Profiles, and four bbox/mask conditions.
 
 ## Select the ICL condition at runtime
 

@@ -1,5 +1,6 @@
 import sys
 import json
+import shutil
 import time
 import torch
 import pickle
@@ -202,6 +203,7 @@ class BaseTaskCfg(DirectRLEnvCfg):
     # Opt-in expert-demonstration support. Existing collection keeps its
     # historical post-pre_move format unless record_pre_move is enabled.
     record_pre_move: bool = False
+    capture_p6_collection: bool = False
     # Replay of a trajectory that already contains pre_move must start from
     # the ungrasped reset state instead of executing privileged setup again.
     execute_pre_move: bool = True
@@ -249,6 +251,7 @@ class BaseTask(UipcRLEnv):
         self.atom_id = 0
         self.log = ''
         self.metadata = {}
+        self._p6_collection_waypoints = []
  
         self.instruction = ""
         self.video_handler = VideoHandler()
@@ -325,6 +328,9 @@ class BaseTask(UipcRLEnv):
         self.save_path = self.save_root / 'hdf5' / f'{self.cfg.seed}.hdf5'
         self.save_video_path = self.save_root / 'video' / f'{self.cfg.seed}.mp4'
         self.metadata_path = self.save_root / 'metadata.json'
+        self.p6_collection_root = (
+            self.save_root / 'p6_collection_candidates' / str(self.cfg.seed)
+        )
 
         self.cfg.uipc_sim.workspace = str(self.save_root / 'scene')
 
@@ -382,6 +388,11 @@ class BaseTask(UipcRLEnv):
 
     def initialize_task_references(self):
         """Initialize checker targets without privileged robot/object motion."""
+
+        pass
+
+    def initialize_replay_task_phase(self):
+        """Restore references that are defined only after expert pre-move."""
 
         pass
 
@@ -528,6 +539,9 @@ class BaseTask(UipcRLEnv):
         self.keep_still_times = 0
         self.metadata = {}
         self.log = ''
+        self._p6_collection_waypoints = []
+        if self.cfg.capture_p6_collection and self.p6_collection_root.exists():
+            shutil.rmtree(self.p6_collection_root)
 
     def pause(self):
         self.sim.pause()
@@ -728,10 +742,50 @@ class BaseTask(UipcRLEnv):
             self.metadata['cost_time'] = time.perf_counter() - self.start_time
             self.metadata['result'] = result
             self._save_metadata()
+        if (
+            self.cfg.capture_p6_collection
+            and result is not None
+            and result != 'success'
+            and self.p6_collection_root.exists()
+        ):
+            shutil.rmtree(self.p6_collection_root)
  
     def save_to_hdf5(self):
         self.save_path.parent.mkdir(parents=True, exist_ok=True)
         HDF5Handler().pkls_to_hdf5(self.tmp_save_dir, self.save_path)
+
+    def finalize_p6_collection_candidate(self):
+        """Freeze the successful collector-side P6 stream as unverified input."""
+
+        if not self.cfg.capture_p6_collection:
+            return None
+        from agent_env.p6_expert_master import (
+            build_p6_collection_candidate_manifest,
+        )
+
+        task_name = self.__class__.__module__.rsplit('.', 1)[-1]
+        collection_video = self.save_video_path.with_name(
+            f'{self.save_video_path.stem}_success{self.save_video_path.suffix}'
+        )
+        manifest = build_p6_collection_candidate_manifest(
+            task=task_name,
+            seed=int(self.cfg.seed),
+            source_hdf5=self.save_path,
+            collection_video=collection_video,
+            candidate_root=self.p6_collection_root,
+            waypoint_records=self._p6_collection_waypoints,
+        )
+        manifest_path = self.p6_collection_root / 'p6_collection_candidate_manifest.json'
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2) + '\n',
+            encoding='utf-8',
+        )
+        self.metadata['p6_collection_candidate_manifest'] = str(
+            manifest_path.resolve()
+        )
+        self._save_metadata()
+        return manifest_path
     
     def _save_metadata(self):
         if self.metadata_path.exists():
@@ -760,6 +814,32 @@ class BaseTask(UipcRLEnv):
         self.tmp_save_dir.mkdir(parents=True, exist_ok=True)
         with open(self.tmp_save_dir / f'{self.save_count}.pkl', 'wb') as f:
             pickle.dump(to_cpu(obs), f)
+        if self.cfg.capture_p6_collection:
+            from agent_env.p6_expert_master import capture_p6_observation
+
+            task_name = self.__class__.__module__.rsplit('.', 1)[-1]
+            observation_id = f'demo_obs_{self.save_count:03d}'
+            p6_observation, tactile_health = capture_p6_observation(
+                task=self,
+                task_name=task_name,
+                observation_id=observation_id,
+                observation_root=self.p6_collection_root / 'p6_observations',
+                initial_observation=self.save_count == 0,
+                raw_observation=obs,
+            )
+            self._p6_collection_waypoints.append({
+                'source_frame_index': int(self.save_count),
+                'source_sim_step': int(obs['step']),
+                'observation_file': str(
+                    (
+                        self.p6_collection_root
+                        / 'p6_observations'
+                        / p6_observation['observation_id']
+                        / 'observation.json'
+                    ).resolve()
+                ),
+                'tactile_health': tactile_health,
+            })
         self.save_count += 1
  
     def check_success(self):

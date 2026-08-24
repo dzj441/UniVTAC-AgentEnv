@@ -58,6 +58,66 @@ class FixedDemoAssetSpec:
 
 
 _FIXED_DEMO_ASSETS = {
+    "grasp_classify": FixedDemoAssetSpec(
+        task="grasp_classify",
+        seed=0,
+        manifest_relative_path=(
+            "grasp_classify_seed_0_wrist_depth_v4/p6_master_manifest.json"
+        ),
+        manifest_sha256=(
+            "175495b27b31c54183bcfc6f9e39a0c847214ad202411e6a356e3c6d317d3a4a"
+        ),
+    ),
+    "insert_HDMI": FixedDemoAssetSpec(
+        task="insert_HDMI",
+        seed=0,
+        manifest_relative_path=(
+            "insert_HDMI_seed_0_wrist_depth_v3/p6_master_manifest.json"
+        ),
+        manifest_sha256=(
+            "8c0f7331c62a542fda5739ab5b514d000c9c296f567874f1aaf76541fa17e4c1"
+        ),
+    ),
+    "insert_hole": FixedDemoAssetSpec(
+        task="insert_hole",
+        seed=0,
+        manifest_relative_path=(
+            "insert_hole_seed_0_wrist_depth_v3/p6_master_manifest.json"
+        ),
+        manifest_sha256=(
+            "24fa65215201491c149f972f898d33ade9fa7cf79a7fe94e2cbc6594f40027ac"
+        ),
+    ),
+    "insert_tube": FixedDemoAssetSpec(
+        task="insert_tube",
+        seed=0,
+        manifest_relative_path=(
+            "insert_tube_seed_0_wrist_depth_v3/p6_master_manifest.json"
+        ),
+        manifest_sha256=(
+            "f483770dcb4598601a5cb06ec45a831d20ecaefcdbca5b87d27f46c161d1c733"
+        ),
+    ),
+    "lift_bottle": FixedDemoAssetSpec(
+        task="lift_bottle",
+        seed=0,
+        manifest_relative_path=(
+            "lift_bottle_seed_0_wrist_depth_v3/p6_master_manifest.json"
+        ),
+        manifest_sha256=(
+            "23213331a5099ce3f335628452ca2873051f6ed53d9f705667e09578b625bb70"
+        ),
+    ),
+    "lift_can": FixedDemoAssetSpec(
+        task="lift_can",
+        seed=0,
+        manifest_relative_path=(
+            "lift_can_seed_0_wrist_depth_v3/p6_master_manifest.json"
+        ),
+        manifest_sha256=(
+            "6aa094d37cebf3b5c4e0c1c5c6ae8a3ba333d99dc5babda4c65fa97933925ad0"
+        ),
+    ),
     "pull_out_key": FixedDemoAssetSpec(
         task="pull_out_key",
         seed=0,

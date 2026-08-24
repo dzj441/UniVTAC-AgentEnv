@@ -58,6 +58,14 @@ parser.add_argument(
     default=None,
     help="Override the configured collection root.",
 )
+parser.add_argument(
+    "--capture-p6-observations",
+    action="store_true",
+    help=(
+        "Save a maximal P6 observation stream with initial bbox/mask beside "
+        "each successful source HDF5. The result remains replay-unverified."
+    ),
+)
 
 args_cli = parser.parse_args()
 if args_cli.gpu is not None:
@@ -102,6 +110,8 @@ app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
 import importlib
+from agent_env.expert_tasks import get_expert_task
+from agent_env.p6_expert_master import configure_p6_capture_cfg
 if TYPE_CHECKING:
     from envs._base_task import BaseTask, BaseTaskCfg
 
@@ -154,6 +164,7 @@ def run(task: 'BaseTask', episode_num, use_seed, start_seed, max_seed):
                 else:
                     mean_steps = task.step_count
                 task.clean_cache(mean_steps=mean_steps, result='success')
+                task.finalize_p6_collection_candidate()
             else:
                 log(f"[{suc_num:<3d}] Seed {seed} failed in {cost_t:.2f} s.\n"
                     f"Plan {task.plan_success}, Check {task.check_success()}")
@@ -204,6 +215,19 @@ def main():
     env_cfg.record_pre_move = bool(
         args_cli.record_pre_move or task_config.get("record_pre_move", False)
     )
+    capture_p6_observations = bool(
+        args_cli.capture_p6_observations
+        or task_config.get("capture_p6_observations", False)
+    )
+    if capture_p6_observations and not env_cfg.record_pre_move:
+        parser.error(
+            "P6 fixed-expert collection requires --record-pre-move or "
+            "record_pre_move: true"
+        )
+    if capture_p6_observations:
+        get_expert_task(task_file_name)
+        configure_p6_capture_cfg(env_cfg)
+    env_cfg.capture_p6_collection = capture_p6_observations
     env_cfg.max_save_frames = task_config.get(
         "max_save_frames", env_cfg.max_save_frames
     )

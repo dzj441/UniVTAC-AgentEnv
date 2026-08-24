@@ -58,12 +58,11 @@ class Task(BaseTask):
         self.origin_inhand_pose = self.prism.get_pose().rebase(
             self._robot_manager.get_gripper_center_pose())
 
-        base_pose = self.slot.get_pose()
+        self.initialize_task_references()
         self.random_noise = self.create_noise(
             [[0.001, 0.004], [0.001, 0.004], 0])
         self.random_noise[:2] *= np.sign(self.rng.uniform(-1, 1, size=2))
         self.metadata['random_noise'] = self.random_noise.tolist()
-        self.hole_pose = base_pose.add_bias([-0.008, 0, 0.077]).add_rotation([0, -np.pi/6, 0])
         try_pose = self.hole_pose.add_offset(self.random_noise)
 
         self.move(self.atom.move_by_displacement(z=0.15), constraint_pose=[1, 1, 1, 1, 1, 0])
@@ -79,6 +78,18 @@ class Task(BaseTask):
             pre_dis=0.05, dis=0.002,
             is_open=False
         ), constraint_pose=[1, 1, 1, 1, 1, 0])
+
+    def initialize_task_references(self):
+        base_pose = self.slot.get_pose()
+        self.hole_pose = base_pose.add_bias([-0.008, 0, 0.077]).add_rotation(
+            [0, -np.pi/6, 0]
+        )
+        self.origin_inhand_pose = self.prism.get_pose().rebase(
+            self._robot_manager.get_gripper_center_pose())
+
+    def initialize_replay_task_phase(self):
+        self.origin_inhand_pose = self.prism.get_pose().rebase(
+            self._robot_manager.get_gripper_center_pose())
 
     def _play_once(self):
         self.try_forward(self.prism, dis=0.02, delta_d=0.01)

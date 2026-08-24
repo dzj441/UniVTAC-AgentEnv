@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -132,17 +133,24 @@ def normalize_instance_mapping(info: Any) -> dict[int, str]:
 def instance_role_mask(
     instance_value: Any,
     id_to_labels: Mapping[int, str],
-    private_prim_name: str,
+    private_prim_names: str | Sequence[str],
 ) -> tuple[np.ndarray, list[int]]:
-    """Select every leaf instance below one private actor prim."""
+    """Select every leaf instance below one or more private actor prims."""
 
     instance = camera_plane(instance_value)
-    token = f"/{private_prim_name}/"
-    suffix = f"/{private_prim_name}"
+    if isinstance(private_prim_names, str):
+        names = (private_prim_names,)
+    else:
+        names = tuple(private_prim_names)
+    if not names or any(not isinstance(name, str) or not name for name in names):
+        raise ValueError("private prim names must be non-empty strings")
     selected = sorted(
         instance_id
         for instance_id, label in id_to_labels.items()
-        if token in label or label.endswith(suffix)
+        if any(
+            f"/{private_name}/" in label or label.endswith(f"/{private_name}")
+            for private_name in names
+        )
     )
     if not selected:
         return np.zeros(instance.shape, dtype=bool), []

@@ -94,6 +94,9 @@ class Task(BaseTask):
         self.move(self.atom.close_gripper(gripper_qpos))
         self.move(self.atom.move_by_displacement(z=0.05))
         
+        self.initialize_task_references()
+
+    def initialize_task_references(self):
         self.target_pose = self.target.get_pose().add_bias([0.0, 0.0, 0.015])
 
     def _play_once(self):
