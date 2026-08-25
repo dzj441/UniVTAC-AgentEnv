@@ -75,7 +75,7 @@ The task changes are assignment extraction, not checker-formula changes:
 
 | Task | `initialize_task_references()` | `initialize_replay_task_phase()` |
 | --- | --- | --- |
-| `grasp_classify` | selected target-pad pose | no override |
+| `grasp_classify` | generic benchmark 固定选择的绿色 target-pad pose | no override |
 | `insert_HDMI` | connector target and hole poses | no override |
 | `insert_hole` | hole/target poses and an initial in-hand fallback | refresh peg/gripper relative pose |
 | `insert_tube` | hole pose and an initial in-hand fallback | refresh tube/gripper relative pose |

@@ -67,14 +67,10 @@ _TASKS = {
         name="grasp_classify",
         module="envs.grasp_classify",
         ungrasped_instruction=(
-            "Grasp the center prism, determine whether it is rough or plain from "
-            "the available observations, and place a rough prism on the orange pad "
-            "or a plain prism on the green pad."
+            "Grasp the center prism and place it upright on the green pad."
         ),
         pregrasped_instruction=(
-            "Determine whether the already-grasped prism is rough or plain from the "
-            "available observations, then place a rough prism on the orange pad or "
-            "a plain prism on the green pad."
+            "Place the already-grasped center prism upright on the green pad."
         ),
         terminal_policy=BASE_TASK_SUCCESS,
     ),
@@ -176,6 +172,14 @@ def benchmark_task_parameters(
         raise ValueError(
             "--key-initial-relative-yaw-rad is valid only for pull_out_key"
         )
+    if task_name == "grasp_classify":
+        return {
+            "target_pad": {
+                "mode": "fixed_color",
+                "color": "green",
+                "material_classification_required": False,
+            }
+        }
     if task_name != "pull_out_key":
         return {}
     if key_initial_relative_yaw_rad is None:

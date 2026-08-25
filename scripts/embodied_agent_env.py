@@ -925,6 +925,8 @@ def make_run_dir() -> Path:
 
 def make_task(run_dir: Path) -> AgentEnvTask:
     cfg = TASK_CFG_CLASS()
+    if TASK_SPEC.name == "grasp_classify":
+        cfg.target_pad_color = TASK_PARAMETERS["target_pad"]["color"]
     if TASK_SPEC.name == "pull_out_key":
         cfg.key_initial_relative_yaw_rad = ARGS.key_initial_relative_yaw_rad
     cfg.save_dir = run_dir / "simulator_internal"

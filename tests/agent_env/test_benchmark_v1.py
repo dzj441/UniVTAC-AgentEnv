@@ -115,6 +115,23 @@ def test_all_eight_tasks_are_registered() -> None:
     assert legacy_manifest["pre_move_enabled"] is True
     assert "already-grasped" in legacy_manifest["instruction"]
 
+    grasp = get_benchmark_task("grasp_classify")
+    assert grasp.instruction == (
+        "Grasp the center prism and place it upright on the green pad."
+    )
+    assert "rough" not in grasp.instruction.lower()
+    assert "plain" not in grasp.instruction.lower()
+
+
+def test_generic_grasp_classify_uses_a_fixed_green_target() -> None:
+    assert benchmark_task_parameters("grasp_classify") == {
+        "target_pad": {
+            "mode": "fixed_color",
+            "color": "green",
+            "material_classification_required": False,
+        }
+    }
+
 
 def test_key_initial_yaw_defaults_to_legacy_random_and_accepts_fixed_override() -> None:
     default = benchmark_task_parameters("pull_out_key")

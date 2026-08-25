@@ -27,9 +27,14 @@ class TaskCfg(BaseTaskCfg):
         )
     ]
     use_adaptive_grasp = False
+    target_pad_color: str = "material_classification"
 
 class Task(BaseTask):
     def __init__(self, cfg: BaseTaskCfg, mode:Literal['collect', 'eval'] = 'collect', render_mode: str|None = None, **kwargs):
+        if cfg.target_pad_color not in {"material_classification", "green", "orange"}:
+            raise ValueError(
+                "target_pad_color must be material_classification, green, or orange"
+            )
         cfg.sim.physics_material.dynamic_friction = 2.5
         cfg.sim.physics_material.static_friction = 2.5
         cfg.uipc_sim.contact.default_friction_ratio = 2.5
@@ -67,12 +72,19 @@ class Task(BaseTask):
         start_pose = Pose([0.35, 0.0, 0.01], [1, 0, 0, 0])
         if self.choice == 'rough':
             self.prism = self.rough_prism
-            self.target = self.orange_pad
-            self.other_target = self.green_pad
         else:
             self.prism = self.plain_prism
+
+        if self.cfg.target_pad_color == "material_classification":
+            target_pad_color = "orange" if self.choice == "rough" else "green"
+        else:
+            target_pad_color = self.cfg.target_pad_color
+        if target_pad_color == "green":
             self.target = self.green_pad
             self.other_target = self.orange_pad
+        else:
+            self.target = self.orange_pad
+            self.other_target = self.green_pad
         self.prism.set_pose(start_pose)
 
     def pre_move(self):

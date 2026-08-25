@@ -87,7 +87,7 @@ Isaac 的 raw instance ID、label、actor 名和 USD prim path 只在 host 内�
 
 | Task | 指令 | 初始状态 | 终局策略 |
 |---|---|---|---|
-| `grasp_classify` | Grasp the center prism, determine whether it is rough or plain from the available observations, and place a rough prism on the orange pad or a plain prism on the green pad. | home pose，prism 未抓取 | 原任务类别条件目标 checker |
+| `grasp_classify` | Grasp the center prism and place it upright on the green pad. | home pose，prism 未抓取 | 固定绿色目标 checker |
 | `insert_HDMI` | Grasp the HDMI connector and insert it fully into the port. | home pose，connector 未抓取 | 原任务 checker |
 | `insert_hole` | Grasp the peg and insert it fully into the angled hole. | home pose，peg 未抓取 | 原任务 checker；Agent close-gripper 后冻结 evaluator-private in-hand reference |
 | `insert_tube` | Grasp the tube and insert it fully into the fixture. | home pose，tube 未抓取 | 原任务 checker；Agent close-gripper 后冻结 evaluator-private in-hand reference |
@@ -95,6 +95,10 @@ Isaac 的 raw instance ID、label、actor 名和 USD prim path 只在 host 内�
 | `lift_can` | Grasp the horizontal can, rotate it upright on the table, and release it. | home pose，can 未抓取 | 原任务 checker |
 | `pull_out_key` | Grasp the key and pull it completely out of the slot. | 默认机器人 home pose，key 未抓取；key 相对 slot 的初始 yaw 恢复原始 `Uniform(-π/2, -π/4)` 分布 | 使用原任务 checker；拔出阈值仍需后续视频校准 |
 | `put_bottle_in_shelf` | Pick up the bottle from the table, place it upright inside the shelf, and release it. | 默认机器人 home pose，bottle 未抓取 | 原位置/姿态 checker + 已松爪 + 60 physics steps 后稳定 |
+
+generic `grasp_classify` benchmark 固定以绿色 pad 为目标，不再要求根据触觉区分 rough/plain；
+上游数采任务的默认 `material_classification` 模式保持不变。注册的 seed-0 ICL 轨迹本来就是
+plain prism 放到绿色 pad 的成功演示，因此可直接复用，无需重新采集或修改 frozen master。
 
 v1 默认关闭 task-specific `pre_move()`，因此 Agent 必须自行定位、接近并抓取物体。为复现
 旧的抓取后评测，可显式添加 `--pre-move`；该模式会原样调用上游任务的 privileged
