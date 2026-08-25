@@ -304,15 +304,15 @@ sandbox 模式；这不会改变 Benchmark core 的 observation-contract 责任�
 TODO 是把当前笼统的 tool rejection 文本升级为安全、非泄漏的错误类别，帮助 Agent 自我
 修复参数错误。
 
-Operator prompt 默认只包含当前 task instruction；`icl=fixed_demo` 时额外增加一句已验证
-示范目录提示，配置显式 token budget 时才再增加预算声明。非策略性的三工具生命周期和
+Operator prompt 默认只包含当前 task instruction；`icl=fixed_demo` 时额外声明已验证
+示范位于 `benchmark_inputs/expert_demo/`，它来自同一任务的另一个 episode，
+当前 episode 的场景配置及物体或目标位姿可能不同。该声明只提供资产关系，
+不告诉 Agent 如何适配；配置显式 token budget 时才再增加预算声明。非策略性的三工具
+生命周期和
 task-success 终局可见性放在 base instruction/tool description 中。当前 UniVTAC base
 instruction 仅说明三工具生命周期、每次机器人调用后等待其结果 observation，再进行下一次
 机器人调用，以及 success 只由 `finish_episode` 返回；不再发送额外的 UniVTAC developer
 instruction。
-TODO（待后续 A/B 决定）：评估是否把 ICL 目录提示补充为“该示范来自同一任务的另一个
-episode，当前 episode 的初始场景状态可能不同”。候选提示不继续追加如何使用示范或
-“因此不能精确复刻”等结论，让 Agent 自行判断是否以及如何适配。
 同时为 ICL manifest 设计显式但非策略性的关系元数据，例如：
 
 ```json

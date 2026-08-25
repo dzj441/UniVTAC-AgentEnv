@@ -206,7 +206,7 @@ def test_developer_instruction_requests_public_progress_without_strategy_fields(
     assert "rationale" not in DEVELOPER_INSTRUCTIONS
 
 
-def test_icl_axis_and_minimal_demo_discovery_notice() -> None:
+def test_icl_axis_and_demo_relation_notice() -> None:
     assert [condition.name for condition in list_icl_conditions()] == [
         "none",
         "fixed_demo",
@@ -222,7 +222,12 @@ def test_icl_axis_and_minimal_demo_discovery_notice() -> None:
         icl_condition="fixed_demo",
     )
     assert "benchmark_inputs/expert_demo" not in without_demo
-    assert "benchmark_inputs/expert_demo/" in with_demo
+    assert with_demo == (
+        "Grasp the key and pull it completely out of the slot.\n"
+        "\nA verified successful demonstration from a separate episode of the same "
+        "task is available at benchmark_inputs/expert_demo/. The current scene "
+        "configuration and object or goal poses may differ.\n"
+    )
     assert "observed expert waypoints" not in with_demo
     assert "step_eef actions" not in with_demo
 

@@ -389,11 +389,14 @@ The reference runner selects the diagnostic condition with
 `--icl none|fixed_demo`. `none` creates no expert directory and does not mention
 one to the Agent. `fixed_demo` projects the matching task/profile/annotation
 bundle into the temporary workspace before the Agent thread and adds only a minimal
-discoverability notice. It is incompatible with `--pre-move` because the
+provenance/discoverability notice: the verified demonstration comes from a
+separate episode of the same task, and the current scene configuration and object
+or goal poses may differ. It is incompatible with `--pre-move` because the
 registered demonstrations begin ungrasped. The operator prompt otherwise contains
-only the task instruction; the ICL condition adds one sentence naming
-`benchmark_inputs/expert_demo/`. Tool lifecycle semantics live in the static base
-instruction and tool descriptions, not in task-specific strategy text. The
+only the task instruction; the ICL condition adds those two non-strategic
+sentences and names `benchmark_inputs/expert_demo/`. Tool lifecycle semantics
+live in the static base instruction and tool descriptions, not in task-specific
+strategy text. The
 UniVTAC base instruction contains only the three-tool lifecycle and terminal
 success visibility. It also states the transport invariant that the Agent must
 wait for a robot call's resulting observation before issuing another robot

@@ -103,8 +103,9 @@ def operator_prompt(
     prompt = task.instruction_for(pre_move=pre_move) + "\n"
     if icl_condition.fixed_demo_available:
         prompt += (
-            "\nA verified successful demonstration is available at "
-            "benchmark_inputs/expert_demo/.\n"
+            "\nA verified successful demonstration from a separate episode of the "
+            "same task is available at benchmark_inputs/expert_demo/. The current "
+            "scene configuration and object or goal poses may differ.\n"
         )
     if max_output_tokens is not None:
         prompt += (
