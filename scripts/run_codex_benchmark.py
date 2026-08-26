@@ -38,7 +38,10 @@ from agent_env.benchmark_tasks import (  # noqa: E402
     list_benchmark_tasks,
 )
 from agent_env.capabilities import CapabilityViolation  # noqa: E402
-from agent_env.codex_app_server import CodexAppServerClient  # noqa: E402
+from agent_env.codex_app_server import (  # noqa: E402
+    CodexAppServerClient,
+    CodexAppServerError,
+)
 from agent_env.codex_events import (  # noqa: E402
     EventRecorder,
     audit_codex_events,
@@ -85,6 +88,60 @@ will inspect or do. During longer work, send further commentary when you obtain
 material evidence, finish a meaningful stage, or change approach. Report observable
 actions and conclusions, not hidden chain-of-thought.
 """
+
+
+class CodexTurnFailedError(CodexAppServerError):
+    """Preserve an App Server turn failure before protocol validation runs."""
+
+    def __init__(
+        self,
+        *,
+        thread_id: str | None,
+        turn_id: str | None,
+        error: Any,
+    ) -> None:
+        self.thread_id = thread_id
+        self.turn_id = turn_id
+        self.app_server_error = error
+        if isinstance(error, Mapping):
+            detail = error.get("message") or json.dumps(
+                dict(error), ensure_ascii=False, sort_keys=True
+            )
+        elif error is None:
+            detail = "no App Server error details were provided"
+        else:
+            detail = str(error)
+        super().__init__(f"Codex turn {turn_id or '<unknown>'} failed: {detail}")
+
+    def to_manifest(self) -> dict[str, Any]:
+        return {
+            "component": "codex_app_server",
+            "phase": "turn",
+            "thread_id": self.thread_id,
+            "turn_id": self.turn_id,
+            "error": self.app_server_error,
+        }
+
+
+def raise_for_failed_codex_turn(turn_result: Mapping[str, Any]) -> None:
+    """Raise the original infrastructure failure before action-count checks."""
+
+    turn = turn_result.get("turn")
+    if not isinstance(turn, Mapping) or turn.get("status") != "failed":
+        return
+    raise CodexTurnFailedError(
+        thread_id=(
+            turn_result.get("thread_id")
+            if isinstance(turn_result.get("thread_id"), str)
+            else None
+        ),
+        turn_id=(
+            turn_result.get("turn_id")
+            if isinstance(turn_result.get("turn_id"), str)
+            else None
+        ),
+        error=turn.get("error"),
+    )
 
 
 def operator_prompt(
@@ -450,6 +507,7 @@ def main() -> int:
     codex: CodexAppServerClient | None = None
     recorder: EventRecorder | None = None
     host_close_response: dict[str, Any] | None = None
+    turn_summaries: list[dict[str, Any]] = []
     result: dict[str, Any] = {
         "schema_version": "univtac.embodied_codex_rollout_outcome.v1",
         "created_utc": utc_now(),
@@ -756,7 +814,6 @@ def main() -> int:
                 developer_instructions=DEVELOPER_INSTRUCTIONS,
                 sandbox=args.codex_sandbox,
             )
-            turn_summaries: list[dict[str, Any]] = []
             next_prompt: str | None = prompt
             next_input_items: list[dict[str, Any]] | None = None
             while True:
@@ -798,6 +855,7 @@ def main() -> int:
                         ],
                     }
                 )
+                raise_for_failed_codex_turn(turn)
                 if args.interaction_mode == "single_turn" or gateway.terminal:
                     break
                 if turn["dynamic_tool_call_count"] != 1:
@@ -869,6 +927,17 @@ def main() -> int:
                 "valid_for_scoring": False,
             }
         )
+        if isinstance(exc, CodexTurnFailedError):
+            result.update(
+                {
+                    "failure_category": "infrastructure",
+                    "infrastructure_failure": exc.to_manifest(),
+                    "thread_id": exc.thread_id,
+                    "turn_id": exc.turn_id,
+                    "turn_count": len(turn_summaries),
+                    "turns": turn_summaries,
+                }
+            )
     finally:
         if codex is not None:
             codex.close()

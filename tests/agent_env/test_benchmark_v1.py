@@ -43,11 +43,13 @@ from agent_env.contract import EVALUATOR_SEED_ENV
 from agent_env.icl import get_icl_condition, list_icl_conditions
 from scripts.run_codex_benchmark import (
     BASE_INSTRUCTIONS,
+    CodexTurnFailedError,
     DEVELOPER_INSTRUCTIONS,
     codex_sandbox_policy,
     effective_codex_network_access,
     operator_prompt,
     parse_args,
+    raise_for_failed_codex_turn,
     validate_fixed_demo_evaluation_seed,
 )
 
@@ -311,6 +313,51 @@ def test_reference_runner_defaults_to_multiturn_and_network_enabled(
     )
     assert parse_args().key_initial_relative_yaw_rad == pytest.approx(
         -1.5707963267948966
+    )
+
+
+def test_failed_codex_turn_preserves_infrastructure_error_before_action_count() -> None:
+    turn_result = {
+        "thread_id": "thread-network-failure",
+        "turn_id": "turn-network-failure",
+        "turn": {
+            "status": "failed",
+            "error": {
+                "message": "stream disconnected before completion",
+                "codexErrorInfo": "other",
+                "additionalDetails": None,
+            },
+        },
+        "dynamic_tool_call_count": 0,
+    }
+
+    with pytest.raises(
+        CodexTurnFailedError,
+        match="stream disconnected before completion",
+    ) as failure:
+        raise_for_failed_codex_turn(turn_result)
+
+    assert failure.value.to_manifest() == {
+        "component": "codex_app_server",
+        "phase": "turn",
+        "thread_id": "thread-network-failure",
+        "turn_id": "turn-network-failure",
+        "error": {
+            "message": "stream disconnected before completion",
+            "codexErrorInfo": "other",
+            "additionalDetails": None,
+        },
+    }
+
+
+def test_completed_codex_turn_is_not_classified_as_infrastructure_failure() -> None:
+    raise_for_failed_codex_turn(
+        {
+            "thread_id": "thread-ok",
+            "turn_id": "turn-ok",
+            "turn": {"status": "completed", "error": None},
+            "dynamic_tool_call_count": 0,
+        }
     )
 
 
